@@ -7,6 +7,9 @@ import { query, queryOne, execute } from "../config/db.js";
 import { ENV } from "../config/env.js";
 import { v4 as uuidv4 } from "uuid";
 
+// Android notification channel both apps create with the OneDelivery chime
+const ANDROID_CHANNEL_ID = "onedelivery_alerts";
+
 let firebaseApp = null;
 
 async function getFirebase() {
@@ -49,7 +52,7 @@ export async function sendPushNotification(userId, { title, body, type, data = {
             token: user.fcm_token,
             notification: { title, body },
             data: { type: type || "general", ...Object.fromEntries(Object.entries(data).map(([k,v]) => [k, String(v)])) },
-            android: { priority: "high", notification: { sound: sound ? "default" : null, channelId: "onedelivery" } },
+            android: { priority: "high", notification: { sound: sound ? "default" : null, channelId: ANDROID_CHANNEL_ID } },
             apns:    { payload: { aps: { sound: sound ? "default" : null, badge: 1 } } },
           });
           return;
@@ -71,7 +74,7 @@ export async function sendPushNotification(userId, { title, body, type, data = {
           title, body,
           sound: sound ? "default" : null,
           priority: "high",
-          channelId: "onedelivery", // Android channel both apps create (carries the app's notification sound)
+          channelId: ANDROID_CHANNEL_ID,
           data: { type, ...data },
         }),
         signal: AbortSignal.timeout(5000),
