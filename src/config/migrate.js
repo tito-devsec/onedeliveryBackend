@@ -18,6 +18,7 @@ const ENSURE_COLUMNS = {
   users: [
     ["email_verified", "TINYINT(1) NOT NULL DEFAULT 0"],
     ["phone_verified", "TINYINT(1) NOT NULL DEFAULT 0"],
+    ["google_id",      "VARCHAR(64) DEFAULT NULL"],
   ],
   driver_applications: [
     ["national_id",          "VARCHAR(40) DEFAULT ''"],

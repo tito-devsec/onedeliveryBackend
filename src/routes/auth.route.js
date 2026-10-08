@@ -1,6 +1,6 @@
 // src/routes/auth.route.js
 import { Router } from "express";
-import { register, login, refresh, logout, getMe, updateMe, changePassword } from "../controllers/auth.controller.js";
+import { register, login, googleAuth, refresh, logout, getMe, updateMe, changePassword } from "../controllers/auth.controller.js";
 import { sendVerification, verifyCode } from "../controllers/verification.controller.js";
 import { authenticate } from "../middleware/auth.middleware.js";
 import { uploadImage } from "../middleware/upload.middleware.js";
@@ -11,6 +11,7 @@ const authLimit = rateLimit({ windowMs: 15 * 60 * 1000, max: 20, message: { erro
 
 router.post("/register", authLimit, register);
 router.post("/login",    authLimit, login);
+router.post("/google",   authLimit, googleAuth);
 router.post("/refresh",  refresh);
 router.post("/logout",   logout);
 router.get ("/me",       authenticate, getMe);

@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS users (
   profile_image       TEXT         DEFAULT '',
   expo_push_token     VARCHAR(200) DEFAULT NULL,
   fcm_token           TEXT         DEFAULT NULL,
+  google_id           VARCHAR(64)  DEFAULT NULL,   -- set when signed in with Google
   is_active           TINYINT(1)   NOT NULL DEFAULT 1,
   email_verified      TINYINT(1)   NOT NULL DEFAULT 0,
   phone_verified      TINYINT(1)   NOT NULL DEFAULT 0,

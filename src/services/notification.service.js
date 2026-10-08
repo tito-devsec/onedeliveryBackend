@@ -71,6 +71,7 @@ export async function sendPushNotification(userId, { title, body, type, data = {
           title, body,
           sound: sound ? "default" : null,
           priority: "high",
+          channelId: "onedelivery", // Android channel both apps create (carries the app's notification sound)
           data: { type, ...data },
         }),
         signal: AbortSignal.timeout(5000),

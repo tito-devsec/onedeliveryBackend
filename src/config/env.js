@@ -37,6 +37,9 @@ export const ENV = {
 
   FIREBASE_SERVICE_ACCOUNT_PATH: process.env.FIREBASE_SERVICE_ACCOUNT_PATH || "",
 
+  // Google sign-in: OAuth "Web client" ID(s) the apps request ID tokens for (comma-separated)
+  GOOGLE_CLIENT_IDS: (process.env.GOOGLE_CLIENT_IDS || "").split(",").map(s => s.trim()).filter(Boolean),
+
   GOOGLE_MAPS_API_KEY: process.env.GOOGLE_MAPS_API_KEY || "",
 
   // ── Out-of-app notifications (email) — Brevo SMTP ─────────────────────

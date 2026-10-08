@@ -2,8 +2,11 @@ import crypto from "crypto";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { v4 as uuidv4 } from "uuid";
+import { OAuth2Client } from "google-auth-library";
 import { query, queryOne, execute } from "../config/db.js";
 import { ENV } from "../config/env.js";
+
+const googleClient = new OAuth2Client();
 
 function signAccess(userId, role) {
   return jwt.sign({ sub: userId, role }, ENV.JWT_SECRET, { expiresIn: ENV.JWT_EXPIRES_IN });
@@ -82,6 +85,68 @@ export async function login(req, res) {
   } catch (err) {
     console.error("login:", err.message);
     res.status(500).json({ error: "Login failed" });
+  }
+}
+
+// POST /api/auth/google  { idToken }
+// Sign in — or sign up on first use — with a Google account from the mobile apps.
+export async function googleAuth(req, res) {
+  try {
+    const { idToken } = req.body;
+    if (!idToken) return res.status(400).json({ error: "idToken required" });
+    if (!ENV.GOOGLE_CLIENT_IDS.length) return res.status(503).json({ error: "Google sign-in is not configured" });
+
+    let payload;
+    try {
+      const ticket = await googleClient.verifyIdToken({ idToken, audience: ENV.GOOGLE_CLIENT_IDS });
+      payload = ticket.getPayload();
+    } catch {
+      return res.status(401).json({ error: "Invalid Google sign-in. Please try again." });
+    }
+    // Only a Google-verified email may sign in to (and link with) an existing account
+    if (!payload?.email || !payload.email_verified) {
+      return res.status(401).json({ error: "Your Google account email is not verified" });
+    }
+
+    const email = payload.email.toLowerCase();
+    let user = await queryOne(
+      "SELECT id, name, email, phone, role, profile_image, is_active, google_id FROM users WHERE email = ?",
+      [email]
+    );
+    let isNewUser = false;
+
+    if (user) {
+      if (!user.is_active) return res.status(403).json({ error: "Account suspended" });
+      if (!user.google_id) {
+        await execute("UPDATE users SET google_id = ?, email_verified = 1 WHERE id = ?", [payload.sub, user.id]);
+      }
+    } else {
+      isNewUser = true;
+      const id = uuidv4();
+      const name = (payload.name || email.split("@")[0]).trim().slice(0, 120);
+      await execute(
+        "INSERT INTO users (id, name, email, phone, profile_image, role, google_id, email_verified) VALUES (?, ?, ?, '', ?, 'customer', ?, 1)",
+        [id, name, email, payload.picture || "", payload.sub]
+      );
+      user = { id, name, email, phone: "", role: "customer", profile_image: payload.picture || "" };
+    }
+
+    const accessToken  = signAccess(user.id, user.role);
+    const refreshToken = signRefresh(user.id);
+    const rtHash = crypto.createHash("sha256").update(refreshToken).digest("hex");
+    const rtExp  = new Date(Date.now() + 30 * 24 * 3600 * 1000);
+    await execute("INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at) VALUES (?, ?, ?, ?)",
+      [uuidv4(), user.id, rtHash, rtExp]);
+
+    res.status(isNewUser ? 201 : 200).json({
+      user: { id: user.id, name: user.name, email: user.email, role: user.role, profile_image: user.profile_image },
+      accessToken,
+      refreshToken,
+      isNewUser,
+    });
+  } catch (err) {
+    console.error("googleAuth:", err.message);
+    res.status(500).json({ error: "Google sign-in failed" });
   }
 }
 
