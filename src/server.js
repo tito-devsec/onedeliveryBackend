@@ -134,6 +134,16 @@ app.use("/api/reviews",  reviewRoutes);
 app.use("/api",          userRoutes);    // /api/seller/*, /api/driver/*, /api/notifications/*
 app.use("/api/admin",    adminRoutes);
 
+// ── Public legal pages (linked from the apps, Google sign-in consent screen, Play Store) ──
+const legalDir = path.join(__dirname, "../public/legal");
+app.use("/legal", express.static(legalDir, { maxAge: "1h" }));
+for (const [route, file] of [
+  ["/privacy", "privacy.html"], ["/policy", "privacy.html"],
+  ["/terms", "terms.html"], ["/delete-account", "delete-account.html"],
+]) {
+  app.get(route, (_req, res) => res.sendFile(path.join(legalDir, file)));
+}
+
 // ── Serve admin SPA in production ────────────────────────────────────────────
 if (ENV.isProd) {
   const adminDist = path.join(__dirname, "../../admin/dist");
