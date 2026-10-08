@@ -6,7 +6,7 @@ import {
   applyAsSeller, applicationStatus, getSellerProfile, updateSellerProfile,
   sellerDashboard, applyAsDriver, getDriverProfile, updateDriverProfile,
   driverApplicationStatus,
-  savePushToken, getNotifications,
+  savePushToken, deletePushToken, getNotifications,
 } from "../controllers/seller.controller.js";
 import {
   getWishlist, addToWishlist, removeFromWishlist,
@@ -42,6 +42,7 @@ router.put("/driver/profile",       authenticate, updateDriverProfile);
 
 // ── Notifications ─────────────────────────────────────────────────────────────
 router.post("/notifications/token", authenticate, savePushToken);
+router.delete("/notifications/token", authenticate, deletePushToken);
 router.get ("/notifications",       authenticate, getNotifications);
 
 // ── Wishlist ──────────────────────────────────────────────────────────────────

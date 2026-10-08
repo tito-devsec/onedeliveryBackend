@@ -172,7 +172,7 @@ export async function cancelRide(req, res) {
     await execute("UPDATE ride_requests SET status = 'cancelled', cancelled_at = NOW(), cancelled_reason = 'Cancelled by customer' WHERE id = ?", [ride.id]);
     if (ride.driver_id) {
       const dp = await queryOne("SELECT user_id FROM driver_profiles WHERE id = ?", [ride.driver_id]);
-      if (dp) sendPushNotification(dp.user_id, { title: "❌ Ride Cancelled", body: "Customer cancelled the delivery.", type: "ride_cancelled", data: { rideId: ride.id } }).catch(() => {});
+      if (dp) sendPushNotification(dp.user_id, { title: "❌ Ride Cancelled", body: "Customer cancelled the delivery.", type: "ride_cancelled", data: { rideId: ride.id }, app: "driver" }).catch(() => {});
     }
     res.json({ message: "Ride cancelled" });
   } catch (err) {

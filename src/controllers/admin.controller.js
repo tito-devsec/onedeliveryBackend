@@ -576,6 +576,7 @@ export async function processWithdrawal(req, res) {
         title: "❌ Withdrawal Failed",
         body:  failure_reason || "Your withdrawal could not be processed.",
         type:  "withdrawal_failed", data: {},
+        app:   wd.user_role === "seller" ? "shop" : "driver",
       }).catch(() => {});
     } else {
       await execute("UPDATE withdrawals SET status = 'completed', processed_at = NOW() WHERE id = ?", [id]);
@@ -583,6 +584,7 @@ export async function processWithdrawal(req, res) {
         title: "✅ Withdrawal Processed!",
         body:  `TZS ${parseFloat(wd.amount).toLocaleString()} has been sent to your account.`,
         type:  "withdrawal_completed", data: {},
+        app:   wd.user_role === "seller" ? "shop" : "driver",
       }).catch(() => {});
     }
 
@@ -607,7 +609,8 @@ export async function sendBroadcast(req, res) {
       userIds = users.map((u) => u.id);
     }
 
-    await broadcastNotification(userIds, { title, body, type, data: {} });
+    const app = role === "driver" ? "driver" : role ? "shop" : null;
+    await broadcastNotification(userIds, { title, body, type, data: {}, app });
     res.json({ message: `Broadcast sent to ${userIds.length} users` });
   } catch (err) {
     res.status(500).json({ error: "Broadcast failed" });

@@ -1,6 +1,9 @@
 /**
- * Push Notification Service — Firebase Cloud Messaging (FCM)
- * Falls back to Expo Push API if expo_push_token is set
+ * Push Notification Service
+ * Expo push tokens are stored per device + app (push_tokens), so a user signed in
+ * on several phones, or in both the shop and driver apps, gets every notification
+ * meant for each. Legacy single tokens (users.expo_push_token / fcm_token) from
+ * older app versions are still used.
  */
 import fs from "fs";
 import { query, queryOne, execute } from "../config/db.js";
@@ -9,6 +12,17 @@ import { v4 as uuidv4 } from "uuid";
 
 // Android notification channel both apps create with the OneDelivery chime
 const ANDROID_CHANNEL_ID = "onedelivery_alerts";
+
+// Which app a notification type is for; types not listed go to every app the user has
+const APP_FOR_TYPE = {
+  driver_approved: "driver", driver_rejected: "driver", new_ride_request: "driver",
+  seller_approved: "shop", seller_rejected: "shop", product_approved: "shop", product_rejected: "shop",
+  order_processing: "shop", order_shipped: "shop", order_delivered: "shop", order_cancelled: "shop",
+  order_confirmed: "shop", payment_failed: "shop", delivery_paid: "shop",
+  package_activated: "shop", package_assigned: "shop",
+  ride_searching: "shop", ride_accepted: "shop", no_driver: "shop", ride_going_to_shop: "shop",
+  ride_picked_up: "shop", ride_on_the_way: "shop", ride_delivered: "shop", ride_cancelled: "shop",
+};
 
 let firebaseApp = null;
 
@@ -31,8 +45,35 @@ async function getFirebase() {
   }
 }
 
+const isExpoToken = (t) => typeof t === "string" && (t.startsWith("ExponentPushToken") || t.startsWith("ExpoPushToken"));
+
+async function forgetExpoToken(token) {
+  await execute("DELETE FROM push_tokens WHERE token = ?", [token]);
+  await execute("UPDATE users SET expo_push_token = NULL WHERE expo_push_token = ?", [token]);
+}
+
+// Expo accepts up to 100 messages per request; tickets come back in the same order
+async function sendExpoMessages(messages) {
+  for (let i = 0; i < messages.length; i += 100) {
+    const chunk = messages.slice(i, i + 100);
+    const resp = await fetch("https://exp.host/--/api/v2/push/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify(chunk),
+      signal: AbortSignal.timeout(8000),
+    });
+    const result = await resp.json().catch(() => null);
+    const tickets = Array.isArray(result?.data) ? result.data : [];
+    for (const [k, ticket] of tickets.entries()) {
+      if (ticket?.details?.error === "DeviceNotRegistered") await forgetExpoToken(chunk[k].to);
+      else if (ticket?.status === "error") console.error("Expo push:", ticket.message);
+    }
+  }
+}
+
 // ── Send push to a single user ────────────────────────────────────────────────
-export async function sendPushNotification(userId, { title, body, type, data = {}, sound = true }) {
+// `app`: "shop" | "driver" to target one app, null for every app; defaults by type.
+export async function sendPushNotification(userId, { title, body, type, data = {}, sound = true, app }) {
   try {
     const user = await queryOne("SELECT expo_push_token, fcm_token FROM users WHERE id = ?", [userId]);
     if (!user) return;
@@ -43,7 +84,7 @@ export async function sendPushNotification(userId, { title, body, type, data = {
       [uuidv4(), userId, title, body, type || "general", JSON.stringify(data)]
     );
 
-    // Try FCM first
+    // Legacy FCM token (clients that registered a raw FCM token)
     if (user.fcm_token) {
       const admin = await getFirebase();
       if (admin) {
@@ -64,26 +105,26 @@ export async function sendPushNotification(userId, { title, body, type, data = {
       }
     }
 
-    // Fallback: Expo Push
-    if (user.expo_push_token?.startsWith("ExponentPushToken") || user.expo_push_token?.startsWith("ExpoPushToken")) {
-      const resp = await fetch("https://exp.host/--/api/v2/push/send", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          to: user.expo_push_token,
-          title, body,
-          sound: sound ? "default" : null,
-          priority: "high",
-          channelId: ANDROID_CHANNEL_ID,
-          data: { type, ...data },
-        }),
-        signal: AbortSignal.timeout(5000),
-      });
-      const result = await resp.json();
-      if (result?.data?.details?.error === "DeviceNotRegistered") {
-        await execute("UPDATE users SET expo_push_token = NULL WHERE id = ?", [userId]);
-      }
-    }
+    // Expo push: every device/app this user is signed in on, plus the legacy column
+    const target = app === undefined ? (APP_FOR_TYPE[type] || null) : app;
+    const rows = await query("SELECT token, app FROM push_tokens WHERE user_id = ?", [userId]);
+    const tokens = new Map(rows.map((r) => [r.token, r.app]));
+    if (user.expo_push_token && !tokens.has(user.expo_push_token)) tokens.set(user.expo_push_token, null);
+
+    // Tokens without an app (older app versions) can't be told apart, so they always get it
+    const recipients = [...tokens]
+      .filter(([token, tokenApp]) => isExpoToken(token) && (!target || !tokenApp || tokenApp === target))
+      .map(([token]) => token);
+    if (!recipients.length) return;
+
+    await sendExpoMessages(recipients.map((to) => ({
+      to,
+      title, body,
+      sound: sound ? "default" : null,
+      priority: "high",
+      channelId: ANDROID_CHANNEL_ID,
+      data: { type, ...data },
+    })));
   } catch (err) {
     console.error("sendPushNotification:", err.message);
   }
@@ -97,7 +138,8 @@ export async function broadcastNotification(userIds, notification) {
 // ── Notify all users with a given role ───────────────────────────────────────
 export async function notifyByRole(role, notification) {
   const users = await query(
-    "SELECT id FROM users WHERE role = ? AND is_active = 1 AND (fcm_token IS NOT NULL OR expo_push_token IS NOT NULL)",
+    `SELECT u.id FROM users u WHERE u.role = ? AND u.is_active = 1 AND (u.fcm_token IS NOT NULL
+       OR u.expo_push_token IS NOT NULL OR EXISTS (SELECT 1 FROM push_tokens t WHERE t.user_id = u.id))`,
     [role]
   );
   await broadcastNotification(users.map((u) => u.id), notification);
@@ -108,7 +150,17 @@ export async function saveFcmToken(userId, token) {
   await execute("UPDATE users SET fcm_token = ? WHERE id = ?", [token, userId]);
 }
 
-// ── Save Expo token ───────────────────────────────────────────────────────────
-export async function saveExpoToken(userId, token) {
-  await execute("UPDATE users SET expo_push_token = ? WHERE id = ?", [token, userId]);
+// ── Save Expo token (one row per device; a device that signs in to another account moves over) ──
+export async function saveExpoToken(userId, token, app = null, platform = null) {
+  await execute(
+    `INSERT INTO push_tokens (token, user_id, app, platform) VALUES (?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE user_id = VALUES(user_id), app = VALUES(app), platform = VALUES(platform)`,
+    [token, userId, app, platform]
+  );
+}
+
+// ── Remove a device's token (sign-out) ────────────────────────────────────────
+export async function removeExpoToken(userId, token) {
+  await execute("DELETE FROM push_tokens WHERE token = ? AND user_id = ?", [token, userId]);
+  await execute("UPDATE users SET expo_push_token = NULL WHERE id = ? AND expo_push_token = ?", [userId, token]);
 }

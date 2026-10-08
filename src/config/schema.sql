@@ -497,4 +497,18 @@ INSERT IGNORE INTO packages (id, name, type, price, duration_days, features, is_
   ('seller_growth',    'Growth',  'seller',   19900, 30, '["Unlimited products","Featured listing priority","Advanced analytics","Chat support"]', 0, 2),
   ('seller_pro',       'Pro',     'seller',   49900, 30, '["Unlimited products","Top featured placement","Full analytics","Dedicated manager","Promoted in app"]', 0, 3);
 
+-- ─── PUSH TOKENS ─────────────────────────────────────────────────────────────
+-- One row per device + app, so a user signed in on several phones, or in both
+-- the shop and driver apps, gets every notification meant for each of them.
+CREATE TABLE IF NOT EXISTS push_tokens (
+  token      VARCHAR(255) NOT NULL PRIMARY KEY,
+  user_id    CHAR(36)     NOT NULL,
+  app        VARCHAR(20)  DEFAULT NULL,   -- 'shop' | 'driver' (NULL = older app versions)
+  platform   VARCHAR(10)  DEFAULT NULL,
+  created_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+  INDEX idx_push_tokens_user (user_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 SELECT 'OneDelivery MySQL schema applied ✅' AS result;

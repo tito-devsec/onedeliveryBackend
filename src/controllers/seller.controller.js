@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from "uuid";
 import { query, queryOne, execute } from "../config/db.js";
 import { uploadBuffer } from "../services/upload.service.js";
+import { saveExpoToken, saveFcmToken, removeExpoToken } from "../services/notification.service.js";
 
 // POST /api/seller/apply
 export async function applyAsSeller(req, res) {
@@ -225,19 +226,36 @@ export async function updateDriverProfile(req, res) {
   }
 }
 
-// POST /api/notifications/token
+// POST /api/notifications/token  { token, type?, app?: "shop" | "driver", platform? }
 export async function savePushToken(req, res) {
   try {
-    const { token, type = "expo" } = req.body;
+    const { token, type = "expo", app, platform } = req.body;
     if (!token) return res.status(400).json({ error: "Token required" });
     if (type === "fcm") {
-      await execute("UPDATE users SET fcm_token = ? WHERE id = ?", [token, req.user.id]);
+      await saveFcmToken(req.user.id, token);
     } else {
-      await execute("UPDATE users SET expo_push_token = ? WHERE id = ?", [token, req.user.id]);
+      await saveExpoToken(
+        req.user.id,
+        String(token).slice(0, 255),
+        ["shop", "driver"].includes(app) ? app : null,
+        platform ? String(platform).slice(0, 10) : null
+      );
     }
     res.json({ saved: true });
   } catch (err) {
     res.status(500).json({ error: "Save failed" });
+  }
+}
+
+// DELETE /api/notifications/token  { token } — the apps call this when signing out
+export async function deletePushToken(req, res) {
+  try {
+    const { token } = req.body || {};
+    if (!token) return res.status(400).json({ error: "Token required" });
+    await removeExpoToken(req.user.id, token);
+    res.json({ removed: true });
+  } catch (err) {
+    res.status(500).json({ error: "Remove failed" });
   }
 }
 
