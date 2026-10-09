@@ -379,8 +379,7 @@ export async function listAdminDeliveries(req, res) {
     if (status) { where += " AND r.status = ?"; vals.push(status); }
 
     const rides = await query(
-      `SELECT r.*, cu.name AS customer_name, du.name AS driver_name,
-              dp.vehicle_type, dp.plate_number
+      `SELECT r.*, cu.name AS customer_name, du.name AS driver_name, dp.plate_number
        FROM ride_requests r
        JOIN users cu ON r.customer_id = cu.id
        LEFT JOIN driver_profiles dp ON r.driver_id = dp.id
