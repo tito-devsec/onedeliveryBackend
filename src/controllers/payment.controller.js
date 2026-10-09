@@ -50,9 +50,11 @@ export async function checkout(req, res) {
       );
       const sub = subs[0];
       const freeShip = sub && ["customer_vip","customer_premium"].includes(sub.package_id);
-      const shippingCost = freeShip ? 0 : ENV.BASE_SHIPPING_COST;
-      const tax = Math.round(subtotal * ENV.TAX_RATE);
-      const total = subtotal + shippingCost + tax;
+      // Product prices already include VAT.
+      // Delivery is charged separately after the product order.
+      const shippingCost = 0;
+      const tax = Math.round((subtotal * ENV.TAX_RATE) / (1 + ENV.TAX_RATE));
+      const total = subtotal;
       const internalRef = genRef();
       const orderId = uuidv4();
 
@@ -125,7 +127,11 @@ export async function checkoutCard(req, res) {
       validated.push({ productId: product.id, sellerId: product.seller_id, name: product.name, price: parseFloat(product.price), quantity: item.quantity, image: images[0] || "" });
     }
 
-    const total = subtotal + ENV.BASE_SHIPPING_COST + Math.round(subtotal * ENV.TAX_RATE);
+    // Product prices already include VAT.
+    // Delivery is charged separately after the product order.
+    const shippingCost = 0;
+    const tax = Math.round((subtotal * ENV.TAX_RATE) / (1 + ENV.TAX_RATE));
+    const total = subtotal;
     const orderId = uuidv4();
     const sellerId = validated[0]?.sellerId || null;
 
@@ -133,7 +139,7 @@ export async function checkoutCard(req, res) {
       `INSERT INTO orders (id, user_id, seller_id, status, subtotal, shipping_cost, tax, total_price,
          shipping_address, payment_method, payment_provider, payment_ref, payment_status)
        VALUES (?, ?, ?, 'awaiting_payment', ?, ?, ?, ?, ?, 'card', 'snippe', ?, 'pending')`,
-      [orderId, user.id, sellerId, subtotal, ENV.BASE_SHIPPING_COST, Math.round(subtotal * ENV.TAX_RATE), total, JSON.stringify(shippingAddress), genRef()]
+      [orderId, user.id, sellerId, subtotal, shippingCost, tax, total, JSON.stringify(shippingAddress), genRef()]
     );
 
     for (const item of validated) {
@@ -334,6 +340,7 @@ export async function snippeWebhook(req, res) {
 
     const event = req.body;
     const data  = event.data;
+    console.log("[webhook-debug] type=" + event.type + " reference=" + data?.reference + " external_reference=" + data?.external_reference + " metadata=" + JSON.stringify(data?.metadata));
     if (!data?.reference) return;
 
     // Idempotency: skip if already processed
@@ -356,6 +363,7 @@ export async function snippeWebhook(req, res) {
 
 async function handleOrderWebhook(eventType, data) {
   const order = await queryOne("SELECT * FROM orders WHERE payment_ref = ?", [data.reference]);
+  console.log("[webhook-debug] order lookup payment_ref=" + data.reference + " found=" + !!order + " orderId=" + (order ? order.id : null));
   if (!order) return;
   if (["success","failed"].includes(order.payment_status)) return;
 

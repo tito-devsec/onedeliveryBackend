@@ -68,7 +68,7 @@ app.use(
     },
     credentials: true,
     methods: ["GET","POST","PUT","DELETE","PATCH","OPTIONS"],
-    allowedHeaders: ["Authorization","Content-Type","X-Request-ID","Idempotency-Key"],
+    allowedHeaders: ["Authorization","Content-Type","X-Request-ID","Idempotency-Key","X-Client"],
     maxAge: 86400,
   })
 );
@@ -144,14 +144,7 @@ for (const [route, file] of [
   app.get(route, (_req, res) => res.sendFile(path.join(legalDir, file)));
 }
 
-// ── Serve admin SPA in production ────────────────────────────────────────────
-if (ENV.isProd) {
-  const adminDist = path.join(__dirname, "../../admin/dist");
-  app.use(express.static(adminDist));
-  app.get(/^(?!\/api).*/, (_req, res) =>
-    res.sendFile(path.join(adminDist, "index.html"))
-  );
-}
+// The admin SPA is served by nginx at admin.onedelivery.co.tz, not by the API.
 
 // ── 404 ───────────────────────────────────────────────────────────────────────
 app.use((_req, res) => res.status(404).json({ error: "Not found" }));

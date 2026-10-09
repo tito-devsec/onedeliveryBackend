@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS refresh_tokens (
   created_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
   INDEX idx_rt_user (user_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ─── SELLER PROFILES ─────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS seller_profiles (
@@ -220,7 +220,7 @@ CREATE TABLE IF NOT EXISTS cart_items (
   UNIQUE KEY uq_cart (user_id, product_id),
   FOREIGN KEY (user_id)    REFERENCES users(id)    ON DELETE CASCADE,
   FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ─── WISHLIST ────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS wishlist (
@@ -230,7 +230,7 @@ CREATE TABLE IF NOT EXISTS wishlist (
   PRIMARY KEY (user_id, product_id),
   FOREIGN KEY (user_id)    REFERENCES users(id)    ON DELETE CASCADE,
   FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ─── ORDERS ──────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS orders (
@@ -329,7 +329,7 @@ CREATE TABLE IF NOT EXISTS driver_earnings (
   created_at   DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (driver_id) REFERENCES driver_profiles(id) ON DELETE CASCADE,
   INDEX idx_de_driver (driver_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ─── WITHDRAWALS ─────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS withdrawals (
@@ -380,7 +380,7 @@ CREATE TABLE IF NOT EXISTS conversations (
   created_at DATETIME  NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME  NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   INDEX idx_conv_updated (updated_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS conversation_participants (
   conversation_id CHAR(36) NOT NULL,
@@ -391,7 +391,7 @@ CREATE TABLE IF NOT EXISTS conversation_participants (
   FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
   FOREIGN KEY (user_id)         REFERENCES users(id)         ON DELETE CASCADE,
   INDEX idx_cp_user (user_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS messages (
   id              CHAR(36)  NOT NULL PRIMARY KEY,
@@ -453,14 +453,14 @@ CREATE TABLE IF NOT EXISTS subscriptions (
   INDEX idx_sub_user    (user_id),
   INDEX idx_sub_status  (status),
   INDEX idx_sub_expires (expires_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ─── PROCESSED WEBHOOKS (deduplication) ──────────────────────────────────────
 CREATE TABLE IF NOT EXISTS processed_webhooks (
   event_id   VARCHAR(100) NOT NULL PRIMARY KEY,
   created_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   INDEX idx_pw_created (created_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ─── AUDIT LOGS ──────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS audit_logs (
@@ -475,7 +475,7 @@ CREATE TABLE IF NOT EXISTS audit_logs (
   INDEX idx_audit_user   (user_id),
   INDEX idx_audit_action (action),
   INDEX idx_audit_entity (entity, entity_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ─── SEED DEFAULT CATEGORIES ──────────────────────────────────────────────────
 INSERT IGNORE INTO categories (id, name, icon, color, sort_order) VALUES
