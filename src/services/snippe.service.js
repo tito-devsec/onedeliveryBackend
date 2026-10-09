@@ -174,10 +174,10 @@ export function verifyWebhookSignature(rawBody, reqHeaders) {
 }
 
 export const MOBILE_PROVIDERS = [
-  { id: "mpesa",   name: "M-Pesa",      color: "#00A859", prefix: ["076","077"] },
-  { id: "airtel",  name: "Airtel Money", color: "#FF0000", prefix: ["078","079"] },
-  { id: "mixx",    name: "Mixx by Yas",  color: "#0099CC", prefix: ["071","072","073"] },
-  { id: "halotel", name: "HaloPesa",     color: "#F7941D", prefix: ["062","061"] },
+  { id: "mpesa",   name: "M-Pesa",      color: "#00A859", prefix: ["074","075","076"] },
+  { id: "airtel",  name: "Airtel Money", color: "#FF0000", prefix: ["068","069","078"] },
+  { id: "mixx",    name: "Mixx by Yas",  color: "#0099CC", prefix: ["065","067","071","077"] },
+  { id: "halotel", name: "HaloPesa",     color: "#F7941D", prefix: ["061","062"] },
 ];
 
 export function detectProvider(phone) {

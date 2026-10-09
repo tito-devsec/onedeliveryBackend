@@ -627,6 +627,7 @@ export async function raiseOffer(req, res) {
     );
     if (!ride) return res.status(404).json({ error: "Ride not found" });
     if (ride.status !== "searching") return res.status(409).json({ error: "A driver has already been chosen" });
+    if (ride.delivery_fee_paid) return res.status(409).json({ error: "This delivery is already paid — its price can't change" });
     const current = parseFloat(ride.offered_fare ?? ride.fare);
     const range = offerRange(parseFloat(ride.suggested_fare ?? current), ride.vehicle_type);
     const fare = roundFare(Number(req.body.fare));

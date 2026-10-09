@@ -2,6 +2,7 @@ import crypto from "crypto";
 import { v4 as uuidv4 } from "uuid";
 import { query, queryOne, execute, withTransaction } from "../config/db.js";
 import { ENV } from "../config/env.js";
+import { getRedis } from "../config/redis.js";
 import { sendPushNotification } from "../services/notification.service.js";
 import {
   initiateMobilePayment, initiateCardPayment,
@@ -189,20 +190,32 @@ export async function payDeliveryFee(req, res) {
     if (!["accepted", "going_to_shop", "picked_up", "on_the_way"].includes(ride.status)) {
       return res.status(400).json({ error: "You can pay once a driver has accepted your delivery", code: "not_agreed_yet" });
     }
-    // Choosing to pay in the app (even after picking cash) switches the delivery to mobile money
-    if (ride.payment_method !== "mobile") await execute("UPDATE ride_requests SET payment_method = 'mobile' WHERE id = ?", [rideId]);
+    // One prompt at a time: a second tap while the first prompt is open could charge twice
+    const redis = getRedis();
+    const pendingKey = `pay:dlv:pending:${rideId}`;
+    const free = await redis.set(pendingKey, "1", "EX", 90, "NX").catch(() => "OK");
+    if (!free) {
+      return res.status(409).json({ error: "We just sent a payment prompt to your phone — approve it, or try again in a minute", code: "payment_pending" });
+    }
+    // Each attempt has its own idempotency key, so a declined or expired prompt can be retried
+    const attempt = await redis.incr(`pay:dlv:attempt:${rideId}`).catch(() => Date.now() % 100000);
+    redis.expire(`pay:dlv:attempt:${rideId}`, 7 * 86400).catch(() => {});
 
     const user = req.user;
     const payResult = await initiateDeliveryPayment({
       amount: ride.fare, phoneNumber: payerPhone,
       customer: { firstname: user.name.split(" ")[0], lastname: user.name.split(" ").slice(1).join(" "), email: user.email },
       rideId,
-      idempotencyKey: idemKey("DLV", rideId),
+      idempotencyKey: idemKey(`DLV${attempt}`, rideId),
     });
 
-    if (!payResult.success) return res.status(400).json({ error: payResult.message });
+    if (!payResult.success) {
+      redis.del(pendingKey).catch(() => {});
+      return res.status(400).json({ error: payResult.message });
+    }
 
-    await execute("UPDATE ride_requests SET delivery_payment_ref = ? WHERE id = ?", [payResult.reference, rideId]);
+    // Paying in the app (even after choosing cash) makes it a mobile-money delivery
+    await execute("UPDATE ride_requests SET delivery_payment_ref = ?, payment_method = 'mobile' WHERE id = ?", [payResult.reference, rideId]);
     res.json({ message: "Delivery payment initiated. Check your phone.", paymentRef: payResult.reference });
   } catch (err) {
     res.status(500).json({ error: "Delivery payment failed" });
@@ -357,7 +370,7 @@ export async function snippeWebhook(req, res) {
     const meta = data.metadata || {};
 
     if (meta.type === "package")       await handlePackageWebhook(event.type, data);
-    else if (meta.type === "delivery_fee") await handleDeliveryWebhook(event.type, data);
+    else if (meta.type === "delivery_fee") await handleDeliveryWebhook(event.type, data, req.app.get("io"));
     else                               await handleOrderWebhook(event.type, data);
 
     // Cleanup old entries
@@ -401,16 +414,46 @@ async function handleOrderWebhook(eventType, data) {
   }
 }
 
-async function handleDeliveryWebhook(eventType, data) {
-  const ride = await queryOne("SELECT * FROM ride_requests WHERE delivery_payment_ref = ?", [data.reference]);
-  if (!ride) return;
+async function handleDeliveryWebhook(eventType, data, io) {
+  // By reference, or by the ride id we sent as metadata (an earlier attempt can still complete)
+  const ride = await queryOne(
+    `SELECT r.*, dp.user_id AS driver_user_id FROM ride_requests r
+     LEFT JOIN driver_profiles dp ON dp.id = r.driver_id
+     WHERE r.delivery_payment_ref = ? OR r.id = ? LIMIT 1`,
+    [data.reference, data.metadata?.ride_id || ""]
+  );
+  if (!ride || ride.delivery_fee_paid) return;
+  const fare = `TZS ${Math.round(parseFloat(ride.fare)).toLocaleString("en-US")}`;
+
   if (eventType === "payment.completed") {
-    await execute("UPDATE ride_requests SET delivery_fee_paid = 1 WHERE id = ?", [ride.id]);
+    await execute("UPDATE ride_requests SET delivery_fee_paid = 1, payment_method = 'mobile' WHERE id = ?", [ride.id]);
+    getRedis().del(`pay:dlv:pending:${ride.id}`).catch(() => {});
+    io?.to(`user:${ride.customer_id}`).emit("ride:payment", { rideId: ride.id, status: "paid" });
     sendPushNotification(ride.customer_id, {
-      title: "🚀 Delivery Payment Confirmed",
-      body: "Finding a nearby driver for you...",
+      title: "✅ Delivery paid",
+      body: `You paid ${fare} for delivery. Your driver won't ask you for cash.`,
       type: "delivery_paid",
-      data: { rideId: ride.id },
+      data: { rideId: ride.id, screen: "track_order" },
+    }).catch(() => {});
+    if (ride.driver_user_id) {
+      io?.to(`user:${ride.driver_user_id}`).emit("ride:paid", { rideId: ride.id, fare: parseFloat(ride.fare) });
+      sendPushNotification(ride.driver_user_id, {
+        title: "💰 Paid in the app",
+        body: `The customer paid ${fare} for this delivery — don't collect cash.`,
+        type: "ride_paid",
+        app: "driver",
+        data: { rideId: ride.id, screen: "delivery" },
+      }).catch(() => {});
+    }
+  } else if (["payment.failed", "payment.expired", "payment.voided"].includes(eventType)) {
+    if (data.reference !== ride.delivery_payment_ref) return; // an older attempt; a newer one is under way
+    getRedis().del(`pay:dlv:pending:${ride.id}`).catch(() => {});
+    io?.to(`user:${ride.customer_id}`).emit("ride:payment", { rideId: ride.id, status: "failed" });
+    sendPushNotification(ride.customer_id, {
+      title: "Delivery payment didn't go through",
+      body: `Try again in the app, or pay the driver ${fare} in cash when your order arrives.`,
+      type: "delivery_payment_failed",
+      data: { rideId: ride.id, screen: "track_order" },
     }).catch(() => {});
   }
 }
