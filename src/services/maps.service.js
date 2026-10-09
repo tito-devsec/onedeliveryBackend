@@ -65,6 +65,13 @@ async function allow(service) {
   }
 }
 
+// Requests Google rejects (e.g. billing not active yet, quota or server errors) aren't
+// billed, so they shouldn't use up the free allowance either
+async function refund(service) {
+  if (!monthlyLimit(service)) return;
+  try { await getRedis().decr(monthKey(service)); } catch { /* non-critical */ }
+}
+
 // Autocomplete keystrokes are free when the search ends with a place being picked
 // (Google bills them as "session usage"), so they come off the count at that point.
 const sessionKey = (token) => `maps:ac:session:${token}`;
@@ -137,6 +144,7 @@ export async function computeRoute(origin, destination, { cacheSeconds = 600 } =
     return route;
   } catch (e) {
     console.error("[maps] route:", e.message);
+    await refund("routes");
     return null;
   }
 }
@@ -174,6 +182,7 @@ export async function autocomplete(input, { near, sessionToken } = {}) {
       }));
   } catch (e) {
     console.error("[maps] autocomplete:", e.message);
+    await refund("autocomplete");
     return [];
   }
 }
@@ -199,6 +208,7 @@ export async function placeDetails(placeId, { sessionToken } = {}) {
     return place;
   } catch (e) {
     console.error("[maps] place:", e.message);
+    await refund("details");
     return null;
   }
 }
@@ -215,7 +225,11 @@ export async function reverseGeocode(lat, lng) {
     const res = await fetch(`${GEOCODE_URL}?${qs}`, { signal: AbortSignal.timeout(6000) });
     const json = await res.json();
     if (json.status !== "OK" || !json.results?.length) {
-      if (json.status !== "ZERO_RESULTS") console.error("[maps] geocode:", json.status, json.error_message || "");
+      // ZERO_RESULTS is a billed answer; error statuses are not
+      if (json.status !== "ZERO_RESULTS") {
+        console.error("[maps] geocode:", json.status, json.error_message || "");
+        await refund("geocode");
+      }
       return null;
     }
     // Skip bare plus codes ("XXXX+XX") when a real address is available
@@ -225,6 +239,7 @@ export async function reverseGeocode(lat, lng) {
     return out;
   } catch (e) {
     console.error("[maps] geocode:", e.message);
+    await refund("geocode");
     return null;
   }
 }
