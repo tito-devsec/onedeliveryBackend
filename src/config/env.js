@@ -44,6 +44,9 @@ export const ENV = {
   GOOGLE_MAPS_API_KEY: process.env.GOOGLE_MAPS_API_KEY || "",
   // Live-traffic routes are billed at the Routes "Pro" rate; off by default
   MAPS_TRAFFIC_AWARE:  process.env.MAPS_TRAFFIC_AWARE === "true",
+  // Google calls per service per month before falling back to estimates (Google's free
+  // allowance is 10,000 for each service we use); 0 = no limit
+  MAPS_MONTHLY_LIMIT:  parseInt(process.env.MAPS_MONTHLY_LIMIT || "9500", 10) || 0,
 
   // Pickup point for orders whose seller has no shop profile (OneDelivery's own store)
   STORE_PICKUP_LAT:     parseFloat(process.env.STORE_PICKUP_LAT || ""),

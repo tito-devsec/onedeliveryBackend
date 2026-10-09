@@ -1,7 +1,7 @@
 import { Router } from "express";
-import { authenticate } from "../middleware/auth.middleware.js";
+import { authenticate, requireAdmin } from "../middleware/auth.middleware.js";
 import { redisRateLimit } from "../config/redis.js";
-import { autocomplete, placeDetails, reverseGeocode, computeRoute, mapsEnabled } from "../services/maps.service.js";
+import { autocomplete, placeDetails, reverseGeocode, computeRoute, mapsEnabled, mapsUsage } from "../services/maps.service.js";
 import { toLatLng } from "../services/geo.js";
 
 // Address search and routes for the apps. The Google key stays on the server, and
@@ -43,6 +43,11 @@ router.get("/reverse", authenticate, limit, wrap(async (req, res) => {
   if (!p) return res.status(400).json({ error: "lat and lng required" });
   const geo = await reverseGeocode(p.lat, p.lng);
   res.json({ address: geo?.address || null });
+}));
+
+// GET /api/maps/usage — admins: this month's Google calls per service vs the free limit
+router.get("/usage", authenticate, requireAdmin, wrap(async (_req, res) => {
+  res.json({ enabled: mapsEnabled(), usage: await mapsUsage() });
 }));
 
 // GET /api/maps/route?from=lat,lng&to=lat,lng

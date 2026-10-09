@@ -4,10 +4,11 @@
  *  • Places API (New)       — address search (autocomplete + place details)
  *  • Geocoding API          — coordinates → address
  * The legacy Directions / Places web services can't be enabled on new Google Cloud
- * projects, so they are not used. Results are cached in Redis to keep the bill small.
+ * projects, so they are not used. Results are cached in Redis to keep the bill small,
+ * and each service stops just under Google's free monthly allowance (see `allow`).
  */
 import { ENV } from "../config/env.js";
-import { cacheGet, cacheSet } from "../config/redis.js";
+import { cacheGet, cacheSet, getRedis } from "../config/redis.js";
 
 const ROUTES_URL       = "https://routes.googleapis.com/directions/v2:computeRoutes";
 const AUTOCOMPLETE_URL = "https://places.googleapis.com/v1/places:autocomplete";
@@ -35,6 +36,71 @@ async function google(url, { method = "GET", body, fieldMask, timeoutMs = 8000 }
   return json;
 }
 
+// ── Free monthly allowance ────────────────────────────────────────────────────
+// Google gives Routes, Place Details, Geocoding and Autocomplete 10,000 free calls a
+// month each (live-traffic routes: 5,000). The server counts its own calls and stops
+// at MAPS_MONTHLY_LIMIT (default 9,500); after that the apps use straight-line
+// distances and estimated times until the month turns. 0 = no limit.
+const monthKey = (service) => `maps:usage:${service}:${new Date().toISOString().slice(0, 7)}`;
+
+function monthlyLimit(service) {
+  const limit = ENV.MAPS_MONTHLY_LIMIT;
+  if (!limit) return 0;
+  return service === "routes" && ENV.MAPS_TRAFFIC_AWARE ? Math.floor(limit / 2) : limit;
+}
+
+async function allow(service) {
+  const limit = monthlyLimit(service);
+  if (!limit) return true;
+  try {
+    const r = getRedis();
+    const key = monthKey(service);
+    const used = await r.incr(key);
+    if (used === 1) await r.expire(key, 40 * 24 * 3600);
+    if (used <= limit) return true;
+    if (used === limit + 1) console.warn(`[maps] ${service}: free monthly allowance used (${limit}) — estimates until next month`);
+    return false;
+  } catch {
+    return true; // Redis down: don't take maps away
+  }
+}
+
+// Autocomplete keystrokes are free when the search ends with a place being picked
+// (Google bills them as "session usage"), so they come off the count at that point.
+const sessionKey = (token) => `maps:ac:session:${token}`;
+
+async function noteSearch(token) {
+  try {
+    const r = getRedis();
+    await r.incr(sessionKey(token));
+    await r.expire(sessionKey(token), 600);
+  } catch { /* non-critical */ }
+}
+
+async function settleSearch(token) {
+  try {
+    const r = getRedis();
+    const n = parseInt(await r.get(sessionKey(token)), 10);
+    if (!n) return;
+    await r.del(sessionKey(token));
+    await r.decrby(monthKey("autocomplete"), n);
+  } catch { /* non-critical */ }
+}
+
+// This month's Google calls per service (for logs / admin): calls made, and calls
+// refused because the free allowance was used up
+export async function mapsUsage() {
+  const out = {};
+  for (const s of ["routes", "details", "geocode", "autocomplete"]) {
+    const attempts = parseInt(await getRedis().get(monthKey(s)).catch(() => 0), 10) || 0;
+    const limit = monthlyLimit(s);
+    out[s] = limit
+      ? { calls: Math.min(attempts, limit), refused: Math.max(0, attempts - limit), limit }
+      : { calls: attempts, refused: 0, limit: null };
+  }
+  return out;
+}
+
 // ── Road route A → B ──────────────────────────────────────────────────────────
 // Returns { distanceMeters, durationSeconds, polyline } or null when unavailable.
 // Live traffic (Routes "Pro" pricing) is opt-in with MAPS_TRAFFIC_AWARE=true.
@@ -45,6 +111,7 @@ export async function computeRoute(origin, destination, { cacheSeconds = 600 } =
     const cached = await cacheGet(key);
     if (cached) return cached;
   }
+  if (!(await allow("routes"))) return null;
   try {
     const json = await google(ROUTES_URL, {
       method: "POST",
@@ -78,6 +145,7 @@ export async function computeRoute(origin, destination, { cacheSeconds = 600 } =
 // sessionToken groups the keystrokes and the final details lookup into one billed session.
 export async function autocomplete(input, { near, sessionToken } = {}) {
   if (!mapsEnabled() || !input || input.trim().length < 2) return [];
+  if (!(await allow("autocomplete"))) return [];
   const center = near || DEFAULT_CENTER;
   try {
     const json = await google(AUTOCOMPLETE_URL, {
@@ -93,6 +161,7 @@ export async function autocomplete(input, { near, sessionToken } = {}) {
         ...(sessionToken ? { sessionToken } : {}),
       },
     });
+    if (sessionToken) await noteSearch(sessionToken);
     return (json.suggestions || [])
       .map((s) => s.placePrediction)
       .filter(Boolean)
@@ -115,12 +184,15 @@ export async function placeDetails(placeId, { sessionToken } = {}) {
   const key = `maps:place:${placeId}`;
   const cached = await cacheGet(key);
   if (cached) return cached;
+  if (!(await allow("details"))) return null;
   try {
     const qs = new URLSearchParams({ languageCode: "en", regionCode: "tz" });
     if (sessionToken) qs.set("sessionToken", sessionToken);
     const p = await google(`${PLACE_URL}${encodeURIComponent(placeId)}?${qs}`, {
       fieldMask: "id,formattedAddress,location",
     });
+    // The search ended with a pick: its keystrokes are billed as free session usage
+    if (sessionToken) await settleSearch(sessionToken);
     if (!p?.location) return null;
     const place = { placeId: p.id || placeId, address: p.formattedAddress || "", lat: p.location.latitude, lng: p.location.longitude };
     await cacheSet(key, place, 7 * 24 * 3600);
@@ -137,6 +209,7 @@ export async function reverseGeocode(lat, lng) {
   const key = `maps:geo:${r4(lat)},${r4(lng)}`;
   const cached = await cacheGet(key);
   if (cached) return cached;
+  if (!(await allow("geocode"))) return null;
   try {
     const qs = new URLSearchParams({ latlng: `${lat},${lng}`, key: ENV.GOOGLE_MAPS_API_KEY, language: "en", region: "tz" });
     const res = await fetch(`${GEOCODE_URL}?${qs}`, { signal: AbortSignal.timeout(6000) });
