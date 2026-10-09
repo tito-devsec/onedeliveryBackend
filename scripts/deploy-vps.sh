@@ -53,8 +53,10 @@ DB_NAME=$(env_get DB_NAME); DB_USER=$(env_get DB_USER); DB_PASS=$(env_get DB_PAS
 DB_HOST=$(env_get DB_HOST); DB_PORT=$(env_get DB_PORT)
 mkdir -p "$HOME/onedelivery-backups"
 BACKUP="$HOME/onedelivery-backups/db-$STAMP.sql.gz"
+# --no-tablespaces: avoids needing the PROCESS privilege on MySQL 8 (the app has no
+# stored routines, so none are dumped)
 MYSQL_PWD="$DB_PASS" "$DUMP" -h "${DB_HOST:-127.0.0.1}" -P "${DB_PORT:-3306}" -u "$DB_USER" \
-  --single-transaction --quick --routines "$DB_NAME" | gzip > "$BACKUP"
+  --single-transaction --quick --no-tablespaces "$DB_NAME" | gzip > "$BACKUP"
 gzip -t "$BACKUP" && [ "$(gzip -dc "$BACKUP" | grep -c 'CREATE TABLE')" -gt 0 ] || die "database backup looks empty: $BACKUP"
 echo "Saved $BACKUP ($(du -h "$BACKUP" | cut -f1))"
 
