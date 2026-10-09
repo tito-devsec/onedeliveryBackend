@@ -185,6 +185,12 @@ export async function payDeliveryFee(req, res) {
     );
     if (!ride) return res.status(404).json({ error: "Ride not found" });
     if (ride.delivery_fee_paid) return res.status(400).json({ error: "Delivery fee already paid" });
+    // The price is negotiated: payment opens once a driver and price are agreed
+    if (!["accepted", "going_to_shop", "picked_up", "on_the_way"].includes(ride.status)) {
+      return res.status(400).json({ error: "You can pay once a driver has accepted your delivery", code: "not_agreed_yet" });
+    }
+    // Choosing to pay in the app (even after picking cash) switches the delivery to mobile money
+    if (ride.payment_method !== "mobile") await execute("UPDATE ride_requests SET payment_method = 'mobile' WHERE id = ?", [rideId]);
 
     const user = req.user;
     const payResult = await initiateDeliveryPayment({

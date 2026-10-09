@@ -109,11 +109,15 @@ export async function mapsUsage() {
 }
 
 // ── Road route A → B ──────────────────────────────────────────────────────────
-// Returns { distanceMeters, durationSeconds, polyline } or null when unavailable.
+// Returns { distanceMeters, durationSeconds, polyline } or null when unavailable;
+// with `steps`, also the turn-by-turn steps for driver navigation (still the
+// Essentials price: only live traffic, 10+ waypoints or two-wheeler mode cost more).
 // Live traffic (Routes "Pro" pricing) is opt-in with MAPS_TRAFFIC_AWARE=true.
-export async function computeRoute(origin, destination, { cacheSeconds = 600 } = {}) {
+const STEP_FIELDS = "routes.legs.steps.distanceMeters,routes.legs.steps.navigationInstruction,routes.legs.steps.startLocation,routes.legs.steps.endLocation";
+
+export async function computeRoute(origin, destination, { cacheSeconds = 600, steps = false } = {}) {
   if (!mapsEnabled() || !origin || !destination) return null;
-  const key = `maps:route:${r4(origin.lat)},${r4(origin.lng)}:${r4(destination.lat)},${r4(destination.lng)}`;
+  const key = `maps:route${steps ? "+steps" : ""}:${r4(origin.lat)},${r4(origin.lng)}:${r4(destination.lat)},${r4(destination.lng)}`;
   if (cacheSeconds) {
     const cached = await cacheGet(key);
     if (cached) return cached;
@@ -122,7 +126,7 @@ export async function computeRoute(origin, destination, { cacheSeconds = 600 } =
   try {
     const json = await google(ROUTES_URL, {
       method: "POST",
-      fieldMask: "routes.duration,routes.distanceMeters,routes.polyline.encodedPolyline",
+      fieldMask: "routes.duration,routes.distanceMeters,routes.polyline.encodedPolyline" + (steps ? "," + STEP_FIELDS : ""),
       body: {
         origin:      { location: { latLng: { latitude: origin.lat, longitude: origin.lng } } },
         destination: { location: { latLng: { latitude: destination.lat, longitude: destination.lng } } },
@@ -140,6 +144,16 @@ export async function computeRoute(origin, destination, { cacheSeconds = 600 } =
       durationSeconds: parseInt(String(r.duration || "0s"), 10) || 0,
       polyline:        r.polyline?.encodedPolyline || "",
     };
+    if (steps) {
+      const at = (l) => (l?.latLng ? { lat: l.latLng.latitude, lng: l.latLng.longitude } : null);
+      route.steps = (r.legs?.[0]?.steps || []).map((s) => ({
+        maneuver:       s.navigationInstruction?.maneuver || "STRAIGHT",
+        text:           s.navigationInstruction?.instructions || "",
+        distanceMeters: s.distanceMeters || 0,
+        start:          at(s.startLocation),
+        end:            at(s.endLocation),
+      }));
+    }
     if (cacheSeconds) await cacheSet(key, route, cacheSeconds);
     return route;
   } catch (e) {

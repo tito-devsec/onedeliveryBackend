@@ -105,16 +105,23 @@ export async function nearbySummary(pickup, radiusKm = 10) {
   return byType;
 }
 
-// What a driver sees about a delivery before accepting it
-export function offerPayload(ride, pickupKm) {
-  const fare = parseFloat(ride.fare) || 0;
+// What a driver sees about a delivery before accepting it. `fare` is the customer's
+// current offer; the driver can accept it or send their own price (counter).
+export function offerPayload(ride, pickupKm, myOffer = null) {
+  const fare = parseFloat(ride.offered_fare ?? ride.fare) || 0;
   const tripMeters = ride.route_distance_m || (parseFloat(ride.distance_km) || 0) * 1000;
+  const myCounter = myOffer?.counter_fare != null ? parseFloat(myOffer.counter_fare) : null;
   return {
     id: ride.id,
     vehicle_type: ride.vehicle_type,
     status: ride.status,
     fare,
     earning: Math.round(fare * DRIVER_SHARE),
+    suggested_fare: ride.suggested_fare != null ? parseFloat(ride.suggested_fare) : fare,
+    payment_method: ride.payment_method || "mobile",
+    offer_status: myOffer?.status || "offered",
+    my_counter: myCounter,
+    my_counter_earning: myCounter != null ? Math.round(myCounter * DRIVER_SHARE) : null,
     pickup_lat: parseFloat(ride.pickup_lat),
     pickup_lng: parseFloat(ride.pickup_lng),
     pickup_address: ride.pickup_address || "",
@@ -215,14 +222,37 @@ export async function escalateDispatch(io) {
   }
 }
 
+// Offers a driver can still act on: not yet answered, or answered with their own price
+export const OPEN_OFFER_SQL = "status IN ('offered','countered')";
+
 // Close a ride's open offers and tell those drivers to drop it from their screen.
 // reason: "taken" (someone accepted), "cancelled" or "expired".
 export async function closeOffers(io, rideId, reason, { exceptDriverId = null } = {}) {
   const status = reason === "taken" ? "taken" : "expired";
   const except = exceptDriverId ? " AND driver_id <> ?" : "";
   const args = exceptDriverId ? [rideId, exceptDriverId] : [rideId];
-  const rows = await query(`SELECT driver_user_id FROM ride_offers WHERE ride_id = ? AND status = 'offered'${except}`, args);
+  const rows = await query(`SELECT driver_user_id FROM ride_offers WHERE ride_id = ? AND ${OPEN_OFFER_SQL}${except}`, args);
   if (!rows.length) return;
-  await execute(`UPDATE ride_offers SET status = ?, responded_at = NOW() WHERE ride_id = ? AND status = 'offered'${except}`, [status, ...args]);
+  await execute(`UPDATE ride_offers SET status = ?, responded_at = NOW() WHERE ride_id = ? AND ${OPEN_OFFER_SQL}${except}`, [status, ...args]);
   for (const r of rows) io?.to(`user:${r.driver_user_id}`).emit("ride:closed", { rideId, reason });
+}
+
+// A driver is no longer available (took a delivery, went offline): their open offers on
+// other deliveries expire, and customers looking at their price are told it's gone
+export async function withdrawDriverOffers(io, { driverId = null, driverUserId = null, exceptRideId = null }) {
+  const who = driverId ? "o.driver_id = ?" : "o.driver_user_id = ?";
+  const args = [driverId || driverUserId];
+  const except = exceptRideId ? " AND o.ride_id <> ?" : "";
+  if (exceptRideId) args.push(exceptRideId);
+  const rows = await query(
+    `SELECT o.ride_id, o.driver_id, o.status, r.customer_id
+     FROM ride_offers o JOIN ride_requests r ON r.id = o.ride_id
+     WHERE ${who} AND o.${OPEN_OFFER_SQL}${except}`,
+    args
+  );
+  if (!rows.length) return;
+  await execute(`UPDATE ride_offers o SET o.status = 'expired', o.responded_at = NOW() WHERE ${who} AND o.${OPEN_OFFER_SQL}${except}`, args);
+  for (const r of rows) {
+    if (r.status === "countered") io?.to(`user:${r.customer_id}`).emit("ride:counter_withdrawn", { rideId: r.ride_id, driverId: r.driver_id });
+  }
 }

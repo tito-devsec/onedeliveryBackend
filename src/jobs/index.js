@@ -1,7 +1,7 @@
 import { execute, query } from "../config/db.js";
 import { setDriverOffline } from "../config/redis.js";
 import { sendPushNotification } from "../services/notification.service.js";
-import { escalateDispatch, closeOffers } from "../services/dispatch.service.js";
+import { escalateDispatch, closeOffers, withdrawDriverOffers } from "../services/dispatch.service.js";
 
 // Run all cleanup jobs — call this on a schedule (setInterval or cron)
 
@@ -38,7 +38,7 @@ export async function expireSubscriptions() {
 }
 
 // ── Mark drivers offline if last_seen > 5 min ─────────────────────────────────
-export async function markDriversOffline() {
+export async function markDriversOffline(io) {
   try {
     const silent = await query(
       "SELECT user_id FROM driver_profiles WHERE is_online = 1 AND (last_seen IS NULL OR last_seen < NOW() - INTERVAL 5 MINUTE)"
@@ -47,12 +47,11 @@ export async function markDriversOffline() {
     await execute(
       "UPDATE driver_profiles SET is_online = 0 WHERE is_online = 1 AND (last_seen IS NULL OR last_seen < NOW() - INTERVAL 5 MINUTE)"
     );
-    for (const d of silent) await setDriverOffline(d.user_id).catch(() => {});
-    await execute(
-      `UPDATE ride_offers SET status = 'expired', responded_at = NOW()
-       WHERE status = 'offered' AND driver_user_id IN (${silent.map(() => "?").join(",")})`,
-      silent.map((d) => d.user_id)
-    );
+    for (const d of silent) {
+      await setDriverOffline(d.user_id).catch(() => {});
+      // Their open offers and prices go back to the search
+      await withdrawDriverOffers(io, { driverUserId: d.user_id }).catch(() => {});
+    }
     console.log(`[jobs] Marked ${silent.length} drivers offline (stale heartbeat)`);
   } catch (e) { console.error("[jobs] markDriversOffline:", e.message); }
 }
@@ -81,7 +80,7 @@ export function startJobs(io) {
 
   // Every minute / few minutes
   setInterval(() => expireStaleRides(io), 60 * 1000);
-  setInterval(markDriversOffline,   2 * 60 * 1000);
+  setInterval(() => markDriversOffline(io), 2 * 60 * 1000);
 
   // Every 10 minutes
   setInterval(expireSubscriptions,  10 * 60 * 1000);

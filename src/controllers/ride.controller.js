@@ -3,12 +3,14 @@ import { query, queryOne, execute } from "../config/db.js";
 import { getRedis, setDriverOffline } from "../config/redis.js";
 import { ENV } from "../config/env.js";
 import { sendPushNotification } from "../services/notification.service.js";
-import { calcDistanceKm, calcFare, VEHICLE_INFO, DRIVER_SHARE } from "../services/fare.service.js";
+import {
+  calcDistanceKm, calcFare, tripMetrics, offerRange, roundFare, VEHICLE_INFO, DRIVER_SHARE,
+} from "../services/fare.service.js";
 import { computeRoute } from "../services/maps.service.js";
 import { toLatLng, isValidLatLng, haversineMeters, estimateEtaSeconds } from "../services/geo.js";
 import {
-  ACTIVE_RIDE_STATUSES, ACTIVE_SQL, ORDER_WITH_SHOP_SQL, resolvePickup, pickupLabel,
-  nearbySummary, dispatchRide, closeOffers, offerPayload,
+  ACTIVE_RIDE_STATUSES, ACTIVE_SQL, OPEN_OFFER_SQL, ORDER_WITH_SHOP_SQL, resolvePickup, pickupLabel,
+  nearbySummary, dispatchRide, closeOffers, withdrawDriverOffers, offerPayload,
 } from "../services/dispatch.service.js";
 import {
   recordDriverLocation, broadcastDriverLocation, driverPosition, legRoute, clearLegRoute,
@@ -18,7 +20,11 @@ import {
 const MAX_TRIP_KM = 300; // further than this is a bad GPS fix, not a delivery
 const SHOP_NO_LOCATION = "This shop hasn't set its pickup location yet. We've asked the seller to add it — please try again later.";
 
+const PAYMENT_METHODS = ["mobile", "cash"]; // in the app, or cash to the driver
+
 const round1 = (n) => Math.round(n * 10) / 10;
+const round2 = (n) => Math.round(n * 100) / 100;
+const tzs = (n) => `TZS ${Math.round(n).toLocaleString("en-US")}`;
 const shortId = (id) => `#${String(id).slice(-6).toUpperCase()}`;
 const ioOf = (req) => req.app.get("io");
 
@@ -36,7 +42,7 @@ async function askSellerForLocation(order) {
 }
 
 // mysql2 returns DECIMAL columns as strings
-const NUMERIC = ["pickup_lat", "pickup_lng", "dropoff_lat", "dropoff_lng", "fare", "distance_km", "driver_rating_avg"];
+const NUMERIC = ["pickup_lat", "pickup_lng", "dropoff_lat", "dropoff_lng", "fare", "distance_km", "driver_rating_avg", "suggested_fare", "offered_fare"];
 function numify(ride) {
   if (!ride) return ride;
   for (const k of NUMERIC) if (ride[k] != null) ride[k] = parseFloat(ride[k]);
@@ -69,16 +75,22 @@ export async function getVehicleOptions(req, res) {
       computeRoute(pickup, dropoff),
       nearbySummary(pickup, 10).catch(() => ({})),
     ]);
+    // Road distance and driving time (estimated from the straight line without a route)
+    const trip = tripMetrics(distKm, route);
 
     const options = Object.values(VEHICLE_INFO).map((v) => {
       const n = nearby[v.id];
       const pickupEtaMin = n?.nearestKm != null
         ? Math.max(1, Math.round(estimateEtaSeconds(n.nearestKm * 1000, v.id) / 60))
         : null;
+      const fare = calcFare(v.id, trip.km, trip.min); // suggested, Bolt-style
+      const range = offerRange(fare, v.id);
       return {
         ...v,
-        fare:        calcFare(v.id, distKm),
-        distanceKm:  round1(distKm),
+        fare,
+        offerMin:    range.min,
+        offerMax:    range.max,
+        distanceKm:  round1(trip.km),
         available:   n?.count || 0,
         nearestKm:   n?.nearestKm != null ? round1(n.nearestKm) : null,
         pickupEtaMin,
@@ -88,7 +100,9 @@ export async function getVehicleOptions(req, res) {
 
     res.json({
       options,
-      distanceKm: round1(distKm),
+      distanceKm: round1(trip.km),
+      durationMin: Math.max(1, Math.round(trip.min)),
+      estimated: trip.estimated,
       pickup,
       dropoff,
       route: route
@@ -101,11 +115,14 @@ export async function getVehicleOptions(req, res) {
   }
 }
 
-// POST /api/rides/request
+// POST /api/rides/request  { …, offeredFare?, paymentMethod? }
+// The customer's offer starts the negotiation (default: the suggested price); nearby
+// drivers accept it or answer with their own price.
 export async function requestRide(req, res) {
   try {
-    const { orderId, vehicleType, pickupLat, pickupLng, pickupAddress, dropoffLat, dropoffLng, dropoffAddress } = req.body;
+    const { orderId, vehicleType, pickupLat, pickupLng, pickupAddress, dropoffLat, dropoffLng, dropoffAddress, offeredFare, paymentMethod } = req.body;
     if (!VEHICLE_INFO[vehicleType]) return res.status(400).json({ error: "Choose a delivery vehicle" });
+    const method = PAYMENT_METHODS.includes(paymentMethod) ? paymentMethod : "mobile";
     const dropoff = toLatLng(dropoffLat, dropoffLng);
     if (!dropoff) return res.status(400).json({ error: "Set the drop-off location" });
 
@@ -135,17 +152,28 @@ export async function requestRide(req, res) {
 
     const distKm = calcDistanceKm(pickup.lat, pickup.lng, dropoff.lat, dropoff.lng);
     if (distKm > MAX_TRIP_KM) return res.status(400).json({ error: "The drop-off is too far from the shop for delivery" });
-    const fare   = calcFare(vehicleType, distKm);
-    const route  = await computeRoute(pickup, dropoff);
+    const route = await computeRoute(pickup, dropoff);
+    const trip = tripMetrics(distKm, route);
+    const suggested = calcFare(vehicleType, trip.km, trip.min);
+    const range = offerRange(suggested, vehicleType);
+    const fare = offeredFare == null || offeredFare === "" ? suggested : roundFare(Number(offeredFare));
+    if (!Number.isFinite(fare) || fare < range.min || fare > range.max) {
+      return res.status(400).json({
+        error: `Offer between ${tzs(range.min)} and ${tzs(range.max)}`,
+        code: "offer_out_of_range", min: range.min, max: range.max, suggested,
+      });
+    }
     const rideId = uuidv4();
 
     await execute(
       `INSERT INTO ride_requests (id, customer_id, order_id, vehicle_type, status,
-         pickup_lat, pickup_lng, pickup_address, dropoff_lat, dropoff_lng, dropoff_address, fare, distance_km,
+         pickup_lat, pickup_lng, pickup_address, dropoff_lat, dropoff_lng, dropoff_address,
+         fare, suggested_fare, offered_fare, payment_method, distance_km,
          route_polyline, route_distance_m, route_duration_s, searching_since)
-       VALUES (?, ?, ?, ?, 'searching', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+       VALUES (?, ?, ?, ?, 'searching', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
       [rideId, req.user.id, orderId || null, vehicleType, pickup.lat, pickup.lng, pickupText.slice(0, 300),
-       dropoff.lat, dropoff.lng, String(dropoffAddress || "").slice(0, 300), fare, Math.round(distKm * 100) / 100,
+       dropoff.lat, dropoff.lng, String(dropoffAddress || "").slice(0, 300),
+       fare, suggested, fare, method, round2(trip.km),
        route?.polyline || "", route?.distanceMeters ?? null, route?.durationSeconds ?? null]
     );
 
@@ -157,12 +185,12 @@ export async function requestRide(req, res) {
 
     sendPushNotification(req.user.id, {
       title: "🔍 Finding a driver…",
-      body:  "We're offering your delivery to the drivers nearest the shop.",
+      body:  `Your offer of ${tzs(fare)} went to the drivers nearest the shop. They can accept it or send their own price.`,
       type:  "ride_searching",
       data:  { rideId, screen: "track_order" },
     }).catch(() => {});
 
-    res.status(201).json({ rideId, fare, distanceKm: round1(distKm), status: "searching", driversNotified: offered });
+    res.status(201).json({ rideId, fare, suggestedFare: suggested, paymentMethod: method, distanceKm: round1(trip.km), status: "searching", driversNotified: offered });
   } catch (err) {
     console.error("requestRide:", err.message);
     res.status(500).json({ error: "Failed to request ride" });
@@ -333,13 +361,14 @@ export async function availableRides(req, res) {
     if (await activeRideOf(dp.id)) return res.json({ rides: [] }); // busy drivers get no new offers
 
     const rows = await query(
-      `SELECT r.*, u.name AS customer_name, sp.shop_name, ro.distance_km AS offered_km
+      `SELECT r.*, u.name AS customer_name, sp.shop_name, ro.distance_km AS offered_km,
+              ro.status AS offer_status, ro.counter_fare
        FROM ride_offers ro
        JOIN ride_requests r ON r.id = ro.ride_id
        JOIN users u ON u.id = r.customer_id
        LEFT JOIN orders o ON o.id = r.order_id
        LEFT JOIN seller_profiles sp ON sp.user_id = o.seller_id
-       WHERE ro.driver_id = ? AND ro.status = 'offered' AND r.status = 'searching'
+       WHERE ro.driver_id = ? AND ro.${OPEN_OFFER_SQL} AND r.status = 'searching'
        ORDER BY ro.offered_at DESC LIMIT 20`,
       [dp.id]
     );
@@ -348,7 +377,7 @@ export async function availableRides(req, res) {
       .map((r) => {
         const pickup = toLatLng(r.pickup_lat, r.pickup_lng);
         const km = here && pickup ? haversineMeters(here, pickup) / 1000 : parseFloat(r.offered_km);
-        return offerPayload(r, km);
+        return offerPayload(r, km, { status: r.offer_status, counter_fare: r.counter_fare });
       })
       .sort((a, b) => (a.pickup_distance_km ?? 999) - (b.pickup_distance_km ?? 999));
     res.json({ rides });
@@ -358,70 +387,266 @@ export async function availableRides(req, res) {
   }
 }
 
-// POST /api/rides/:rideId/accept
-export async function acceptRide(req, res) {
+// Give a delivery to a driver at an agreed price — when the driver accepts the
+// customer's offer, or the customer accepts the driver's counter. Only one can win.
+async function assignDriver(io, { rideId, dp, fare, by }) {
   const redis = getRedis();
-  let lockKey = null;
+  const lockKey = `lock:accept:${dp.id}`;
+  // One assignment at a time per driver, so nobody ends up with two deliveries
+  const locked = await redis.set(lockKey, "1", "EX", 10, "NX").catch(() => "OK");
+  if (!locked) return { ok: false, status: 409, error: "This driver is busy right now" };
   try {
-    const dp = await queryOne("SELECT id, user_id FROM driver_profiles WHERE user_id = ? AND is_approved = 1", [req.user.id]);
-    if (!dp) return res.status(403).json({ error: "Driver not approved" });
-
-    // One accept at a time per driver, so nobody ends up with two deliveries
-    lockKey = `lock:accept:${dp.id}`;
-    const locked = await redis.set(lockKey, "1", "EX", 10, "NX").catch(() => "OK");
-    if (!locked) return res.status(409).json({ error: "Already accepting a delivery" });
-
-    if (await activeRideOf(dp.id)) return res.status(409).json({ error: "Finish your current delivery first" });
-
-    const offer = await queryOne("SELECT status FROM ride_offers WHERE ride_id = ? AND driver_id = ?", [req.params.rideId, dp.id]);
-    if (!offer) return res.status(403).json({ error: "This delivery was offered to drivers closer to the shop" });
-    if (offer.status !== "offered") return res.status(409).json({ error: "This delivery is no longer available" });
-
+    if (await activeRideOf(dp.id)) {
+      return { ok: false, status: 409, error: by === "driver" ? "Finish your current delivery first" : "This driver just took another delivery" };
+    }
     // Atomic claim: only one driver can move a ride out of 'searching'
     const claim = await execute(
-      "UPDATE ride_requests SET status = 'accepted', driver_id = ?, accepted_at = NOW() WHERE id = ? AND status = 'searching' AND driver_id IS NULL",
-      [dp.id, req.params.rideId]
+      "UPDATE ride_requests SET status = 'accepted', driver_id = ?, fare = ?, accepted_at = NOW() WHERE id = ? AND status = 'searching' AND driver_id IS NULL",
+      [dp.id, fare, rideId]
     );
     if (claim.affectedRows !== 1) {
-      await execute("UPDATE ride_offers SET status = 'taken', responded_at = NOW() WHERE ride_id = ? AND driver_id = ?", [req.params.rideId, dp.id]);
-      return res.status(409).json({ error: "Another driver already took this delivery" });
+      await execute("UPDATE ride_offers SET status = 'taken', responded_at = NOW() WHERE ride_id = ? AND driver_id = ?", [rideId, dp.id]);
+      return { ok: false, status: 409, error: "Another driver already took this delivery" };
     }
-    await execute("UPDATE ride_offers SET status = 'accepted', responded_at = NOW() WHERE ride_id = ? AND driver_id = ?", [req.params.rideId, dp.id]);
-
-    const io = ioOf(req);
-    await closeOffers(io, req.params.rideId, "taken", { exceptDriverId: dp.id });
-    forgetActiveRide(req.user.id);
+    await execute("UPDATE ride_offers SET status = 'accepted', responded_at = NOW() WHERE ride_id = ? AND driver_id = ?", [rideId, dp.id]);
+    await closeOffers(io, rideId, "taken", { exceptDriverId: dp.id });
+    await withdrawDriverOffers(io, { driverId: dp.id, exceptRideId: rideId });
+    forgetActiveRide(dp.user_id);
 
     const ride = await queryOne(
-      "SELECT r.*, o.seller_id FROM ride_requests r LEFT JOIN orders o ON o.id = r.order_id WHERE r.id = ?",
-      [req.params.rideId]
+      `SELECT r.*, o.seller_id, sp.shop_name, du.name AS driver_name
+       FROM ride_requests r
+       LEFT JOIN orders o ON o.id = r.order_id
+       LEFT JOIN seller_profiles sp ON sp.user_id = o.seller_id
+       JOIN users du ON du.id = ?
+       WHERE r.id = ?`,
+      [dp.user_id, rideId]
     );
-    const pos = await driverPosition(req.user.id);
+    const pos = await driverPosition(dp.user_id);
     const pickup = toLatLng(ride.pickup_lat, ride.pickup_lng);
     const etaMin = pos && pickup ? Math.max(1, Math.round(estimateEtaSeconds(haversineMeters(pos, pickup), ride.vehicle_type) / 60)) : null;
+    const payNote = ride.payment_method === "cash"
+      ? "Pay the driver in cash on delivery."
+      : "Approve the mobile-money payment on your phone.";
 
     sendPushNotification(ride.customer_id, {
-      title: "✅ Driver Found!",
-      body:  etaMin ? `${req.user.name} accepted your delivery and is ~${etaMin} min from the shop.` : `${req.user.name} accepted your delivery.`,
+      title: "✅ Driver confirmed",
+      body:  `${ride.driver_name} will deliver for ${tzs(fare)}${etaMin ? ` and is ~${etaMin} min from the shop` : ""}. ${payNote}`,
       type:  "ride_accepted",
-      data:  { rideId: ride.id, screen: "track_order" },
+      data:  { rideId, screen: "track_order" },
     }).catch(() => {});
     if (ride.order_id && ride.seller_id) {
       sendPushNotification(ride.seller_id, {
         title: "🛵 Driver on the way to your shop",
-        body:  `${req.user.name} is coming to collect order ${shortId(ride.order_id)}${etaMin ? ` (~${etaMin} min)` : ""}. Please have it ready.`,
+        body:  `${ride.driver_name} is coming to collect order ${shortId(ride.order_id)}${etaMin ? ` (~${etaMin} min)` : ""}. Please have it ready.`,
         type:  "ride_driver_assigned",
-        data:  { rideId: ride.id, orderId: ride.order_id, screen: "seller_dashboard" },
+        data:  { rideId, orderId: ride.order_id, screen: "seller_dashboard" },
       }).catch(() => {});
     }
-    emitRideStatus(io, { rideId: ride.id, status: "accepted", customerId: ride.customer_id, sellerId: ride.seller_id, driverUserId: req.user.id });
+    if (by === "customer") {
+      io?.to(`user:${dp.user_id}`).emit("ride:assigned", { rideId, fare });
+      sendPushNotification(dp.user_id, {
+        title: "✅ Customer accepted your price",
+        body:  `Deliver for ${tzs(fare)}. Head to ${ride.shop_name || "the shop"} now.`,
+        type:  "ride_assigned",
+        sound: true,
+        app:   "driver",
+        data:  { rideId, screen: "delivery" },
+      }).catch(() => {});
+    }
+    emitRideStatus(io, { rideId, status: "accepted", customerId: ride.customer_id, sellerId: ride.seller_id, driverUserId: dp.user_id });
+    return { ok: true, ride };
+  } finally {
+    redis.del(lockKey).catch(() => {});
+  }
+}
 
-    res.json({ message: "Ride accepted", rideId: ride.id });
+const openOfferOf = (rideId, driverId) =>
+  queryOne("SELECT status, counter_fare FROM ride_offers WHERE ride_id = ? AND driver_id = ?", [rideId, driverId]);
+
+// POST /api/rides/:rideId/accept — the driver takes the delivery at the customer's offer
+export async function acceptRide(req, res) {
+  try {
+    const dp = await queryOne("SELECT id, user_id FROM driver_profiles WHERE user_id = ? AND is_approved = 1", [req.user.id]);
+    if (!dp) return res.status(403).json({ error: "Driver not approved" });
+    const offer = await openOfferOf(req.params.rideId, dp.id);
+    if (!offer) return res.status(403).json({ error: "This delivery was offered to drivers closer to the shop" });
+    if (!["offered", "countered"].includes(offer.status)) return res.status(409).json({ error: "This delivery is no longer available" });
+    const ride = await queryOne("SELECT fare, offered_fare FROM ride_requests WHERE id = ?", [req.params.rideId]);
+    if (!ride) return res.status(404).json({ error: "Ride not found" });
+    const fare = parseFloat(ride.offered_fare ?? ride.fare);
+
+    const result = await assignDriver(ioOf(req), { rideId: req.params.rideId, dp, fare, by: "driver" });
+    if (!result.ok) return res.status(result.status).json({ error: result.error });
+    res.json({ message: "Ride accepted", rideId: req.params.rideId, fare });
   } catch (err) {
     console.error("acceptRide:", err.message);
     res.status(500).json({ error: "Accept failed" });
-  } finally {
-    if (lockKey) redis.del(lockKey).catch(() => {});
+  }
+}
+
+// The card a customer sees for a driver's counter-offer
+async function counterCard(row) {
+  const pos = await driverPosition(row.user_id);
+  const pickup = toLatLng(row.pickup_lat, row.pickup_lng);
+  const km = pos && pickup ? haversineMeters(pos, pickup) / 1000 : parseFloat(row.distance_km) || null;
+  return {
+    rideId:       row.ride_id,
+    driverId:     row.driver_id,
+    name:         row.name,
+    photo:        row.profile_image || row.driver_photo_url || null,
+    rating:       parseFloat(row.rating) || 0,
+    trips:        row.total_trips || 0,
+    vehicle:      { type: row.vehicle_type, plate: row.plate_number, model: row.vehicle_model, color: row.vehicle_color },
+    fare:         parseFloat(row.counter_fare),
+    pickupKm:     km != null ? round1(km) : null,
+    pickupEtaMin: km != null ? Math.max(1, Math.round(estimateEtaSeconds(km * 1000, row.vehicle_type) / 60)) : null,
+    at:           row.countered_at,
+  };
+}
+
+const COUNTER_SQL = `
+  SELECT o.ride_id, o.driver_id, o.counter_fare, o.countered_at, o.distance_km,
+         dp.user_id, dp.vehicle_type, dp.plate_number, dp.vehicle_model, dp.vehicle_color,
+         dp.rating, dp.total_trips, dp.driver_photo_url, u.name, u.profile_image,
+         r.pickup_lat, r.pickup_lng
+  FROM ride_offers o
+  JOIN driver_profiles dp ON dp.id = o.driver_id
+  JOIN users u ON u.id = dp.user_id
+  JOIN ride_requests r ON r.id = o.ride_id`;
+
+// POST /api/rides/:rideId/counter { fare } — the driver answers with their own price
+export async function counterOffer(req, res) {
+  try {
+    const dp = await queryOne("SELECT id, user_id FROM driver_profiles WHERE user_id = ? AND is_approved = 1", [req.user.id]);
+    if (!dp) return res.status(403).json({ error: "Driver not approved" });
+    if (await activeRideOf(dp.id)) return res.status(409).json({ error: "Finish your current delivery first" });
+    const ride = await queryOne("SELECT * FROM ride_requests WHERE id = ?", [req.params.rideId]);
+    if (!ride || ride.status !== "searching") return res.status(409).json({ error: "This delivery is no longer available" });
+    const offer = await openOfferOf(ride.id, dp.id);
+    if (!offer) return res.status(403).json({ error: "This delivery was offered to drivers closer to the shop" });
+    if (!["offered", "countered"].includes(offer.status)) return res.status(409).json({ error: "This delivery is no longer available" });
+    if (ride.delivery_fee_paid) {
+      return res.status(409).json({ error: `This delivery is already paid at ${tzs(parseFloat(ride.fare))} — accept it at that price` });
+    }
+
+    const current = parseFloat(ride.offered_fare ?? ride.fare);
+    const range = offerRange(parseFloat(ride.suggested_fare ?? current), ride.vehicle_type);
+    const fare = roundFare(Number(req.body.fare));
+    if (!Number.isFinite(fare) || fare <= current) {
+      return res.status(400).json({ error: `Your price must be above the customer's offer of ${tzs(current)} — or accept their offer` });
+    }
+    if (fare > range.max) return res.status(400).json({ error: `The most you can ask for this delivery is ${tzs(range.max)}` });
+
+    await execute(
+      `UPDATE ride_offers SET status = 'countered', counter_fare = ?, countered_at = NOW()
+       WHERE ride_id = ? AND driver_id = ? AND ${OPEN_OFFER_SQL}`,
+      [fare, ride.id, dp.id]
+    );
+    const row = await queryOne(`${COUNTER_SQL} WHERE o.ride_id = ? AND o.driver_id = ?`, [ride.id, dp.id]);
+    const card = await counterCard(row);
+    ioOf(req)?.to(`user:${ride.customer_id}`).emit("ride:counter", card);
+    sendPushNotification(ride.customer_id, {
+      title: "💬 A driver sent a price",
+      body:  `${card.name} can deliver for ${tzs(fare)}${card.pickupKm != null ? ` · ${card.pickupKm} km from the shop` : ""}. Open to accept or wait for more.`,
+      type:  "ride_counter",
+      data:  { rideId: ride.id, screen: "track_order" },
+    }).catch(() => {});
+    res.json({ ok: true, fare });
+  } catch (err) {
+    console.error("counterOffer:", err.message);
+    res.status(500).json({ error: "Could not send your price" });
+  }
+}
+
+// GET /api/rides/:rideId/counters — drivers' prices for the customer to choose from
+export async function listCounters(req, res) {
+  try {
+    const ride = await queryOne("SELECT id, status FROM ride_requests WHERE id = ? AND customer_id = ?", [req.params.rideId, req.user.id]);
+    if (!ride) return res.status(404).json({ error: "Ride not found" });
+    if (ride.status !== "searching") return res.json({ counters: [] });
+    const rows = await query(`${COUNTER_SQL} WHERE o.ride_id = ? AND o.status = 'countered' ORDER BY o.counter_fare ASC, o.countered_at ASC`, [ride.id]);
+    res.json({ counters: await Promise.all(rows.map(counterCard)) });
+  } catch (err) {
+    console.error("listCounters:", err.message);
+    res.status(500).json({ error: "Internal server error" });
+  }
+}
+
+// POST /api/rides/:rideId/counters/:driverId/accept — the customer picks a driver's price
+export async function acceptCounter(req, res) {
+  try {
+    const ride = await queryOne("SELECT id, status FROM ride_requests WHERE id = ? AND customer_id = ?", [req.params.rideId, req.user.id]);
+    if (!ride) return res.status(404).json({ error: "Ride not found" });
+    if (ride.status !== "searching") return res.status(409).json({ error: "A driver has already been chosen" });
+    const offer = await queryOne(
+      "SELECT o.status, o.counter_fare, dp.id, dp.user_id FROM ride_offers o JOIN driver_profiles dp ON dp.id = o.driver_id WHERE o.ride_id = ? AND o.driver_id = ?",
+      [ride.id, req.params.driverId]
+    );
+    if (!offer || offer.status !== "countered") return res.status(409).json({ error: "This driver's price is no longer available" });
+    const fare = parseFloat(offer.counter_fare);
+
+    const result = await assignDriver(ioOf(req), { rideId: ride.id, dp: { id: offer.id, user_id: offer.user_id }, fare, by: "customer" });
+    if (!result.ok) return res.status(result.status).json({ error: result.error });
+    res.json({ message: "Driver confirmed", rideId: ride.id, fare });
+  } catch (err) {
+    console.error("acceptCounter:", err.message);
+    res.status(500).json({ error: "Could not confirm this driver" });
+  }
+}
+
+// POST /api/rides/:rideId/counters/:driverId/reject
+export async function rejectCounter(req, res) {
+  try {
+    const ride = await queryOne("SELECT id FROM ride_requests WHERE id = ? AND customer_id = ?", [req.params.rideId, req.user.id]);
+    if (!ride) return res.status(404).json({ error: "Ride not found" });
+    const offer = await queryOne("SELECT driver_user_id FROM ride_offers WHERE ride_id = ? AND driver_id = ? AND status = 'countered'", [ride.id, req.params.driverId]);
+    if (!offer) return res.json({ ok: true });
+    await execute(
+      "UPDATE ride_offers SET status = 'rejected', responded_at = NOW() WHERE ride_id = ? AND driver_id = ? AND status = 'countered'",
+      [ride.id, req.params.driverId]
+    );
+    ioOf(req)?.to(`user:${offer.driver_user_id}`).emit("ride:closed", { rideId: ride.id, reason: "rejected" });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: "Internal server error" });
+  }
+}
+
+// PUT /api/rides/:rideId/offer { fare } — the customer raises their offer
+export async function raiseOffer(req, res) {
+  try {
+    const ride = await queryOne(
+      `SELECT r.*, sp.shop_name, u.name AS customer_name
+       FROM ride_requests r
+       JOIN users u ON u.id = r.customer_id
+       LEFT JOIN orders o ON o.id = r.order_id
+       LEFT JOIN seller_profiles sp ON sp.user_id = o.seller_id
+       WHERE r.id = ? AND r.customer_id = ?`,
+      [req.params.rideId, req.user.id]
+    );
+    if (!ride) return res.status(404).json({ error: "Ride not found" });
+    if (ride.status !== "searching") return res.status(409).json({ error: "A driver has already been chosen" });
+    const current = parseFloat(ride.offered_fare ?? ride.fare);
+    const range = offerRange(parseFloat(ride.suggested_fare ?? current), ride.vehicle_type);
+    const fare = roundFare(Number(req.body.fare));
+    if (!Number.isFinite(fare) || fare <= current) return res.status(400).json({ error: `Raise your offer above ${tzs(current)}` });
+    if (fare > range.max) return res.status(400).json({ error: `The highest offer for this delivery is ${tzs(range.max)}` });
+
+    const r = await execute("UPDATE ride_requests SET offered_fare = ?, fare = ? WHERE id = ? AND status = 'searching'", [fare, fare, ride.id]);
+    if (!r.affectedRows) return res.status(409).json({ error: "A driver has already been chosen" });
+    ride.offered_fare = fare;
+    ride.fare = fare;
+
+    // Drivers who have it open see the new price; the search widens to more drivers too
+    const io = ioOf(req);
+    const holders = await query(`SELECT driver_user_id, distance_km, status, counter_fare FROM ride_offers WHERE ride_id = ? AND ${OPEN_OFFER_SQL}`, [ride.id]);
+    for (const h of holders) io?.to(`user:${h.driver_user_id}`).emit("ride:offer", offerPayload(ride, parseFloat(h.distance_km), h));
+    dispatchRide(io, ride.id).catch(() => {});
+    res.json({ ok: true, fare });
+  } catch (err) {
+    console.error("raiseOffer:", err.message);
+    res.status(500).json({ error: "Could not update your offer" });
   }
 }
 
@@ -430,13 +655,19 @@ export async function declineRide(req, res) {
   try {
     const dp = await queryOne("SELECT id FROM driver_profiles WHERE user_id = ?", [req.user.id]);
     if (!dp) return res.status(403).json({ error: "Not a driver" });
+    const offer = await openOfferOf(req.params.rideId, dp.id);
     await execute(
-      "UPDATE ride_offers SET status = 'declined', responded_at = NOW() WHERE ride_id = ? AND driver_id = ? AND status = 'offered'",
+      `UPDATE ride_offers SET status = 'declined', responded_at = NOW() WHERE ride_id = ? AND driver_id = ? AND ${OPEN_OFFER_SQL}`,
       [req.params.rideId, dp.id]
     );
-    // Everyone in this wave said no: widen the search now instead of waiting for the timer
-    const open = await queryOne("SELECT COUNT(*) AS c FROM ride_offers WHERE ride_id = ? AND status = 'offered'", [req.params.rideId]);
-    if (!Number(open?.c)) dispatchRide(ioOf(req), req.params.rideId).catch(() => {});
+    const io = ioOf(req);
+    if (offer?.status === "countered") {
+      const ride = await queryOne("SELECT customer_id FROM ride_requests WHERE id = ?", [req.params.rideId]);
+      if (ride) io?.to(`user:${ride.customer_id}`).emit("ride:counter_withdrawn", { rideId: req.params.rideId, driverId: dp.id });
+    }
+    // Everyone holding it said no: widen the search now instead of waiting for the timer
+    const open = await queryOne(`SELECT COUNT(*) AS c FROM ride_offers WHERE ride_id = ? AND ${OPEN_OFFER_SQL}`, [req.params.rideId]);
+    if (!Number(open?.c)) dispatchRide(io, req.params.rideId).catch(() => {});
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: "Decline failed" });
@@ -473,9 +704,13 @@ export async function updateRideStatus(req, res) {
     // A driver who can't make it releases the delivery: it goes back to the nearest
     // other drivers instead of being cancelled on the customer
     if (status === "cancelled") {
+      // The agreed price was with this driver: back to the customer's offer — unless the
+      // customer already paid, in which case the paid price stands
       await execute(
         `UPDATE ride_requests SET status = 'searching', driver_id = NULL, accepted_at = NULL, going_to_shop_at = NULL,
-           dispatch_wave = 0, dispatched_at = NULL, searching_since = NOW()
+           dispatch_wave = 0, dispatched_at = NULL, searching_since = NOW(),
+           offered_fare = IF(delivery_fee_paid = 1, fare, COALESCE(offered_fare, fare)),
+           fare = IF(delivery_fee_paid = 1, fare, COALESCE(offered_fare, fare))
          WHERE id = ? AND driver_id = ?`,
         [ride.id, dp.id]
       );
@@ -496,11 +731,26 @@ export async function updateRideStatus(req, res) {
     if (!moved.affectedRows) return res.status(409).json({ error: "The delivery changed meanwhile — please refresh" });
 
     if (status === "delivered") {
-      const driverEarning = parseFloat(ride.fare) * DRIVER_SHARE;
-      await execute("UPDATE driver_profiles SET balance = balance + ?, total_earnings = total_earnings + ?, total_trips = total_trips + 1 WHERE id = ?",
-        [driverEarning, driverEarning, dp.id]);
-      await execute("INSERT INTO driver_earnings (id, driver_id, ride_id, amount, type, description) VALUES (?, ?, ?, ?, 'delivery', ?)",
-        [uuidv4(), dp.id, ride.id, driverEarning, `Delivery #${ride.id.slice(-6)}`]);
+      const fare = parseFloat(ride.fare);
+      const driverEarning = round2(fare * DRIVER_SHARE);
+      const label = `Delivery #${ride.id.slice(-6)}`;
+      if (ride.delivery_fee_paid) {
+        // Paid in the app: OneDelivery holds the money and owes the driver their share
+        await execute("UPDATE driver_profiles SET balance = balance + ?, total_earnings = total_earnings + ?, total_trips = total_trips + 1 WHERE id = ?",
+          [driverEarning, driverEarning, dp.id]);
+        await execute("INSERT INTO driver_earnings (id, driver_id, ride_id, amount, type, description) VALUES (?, ?, ?, ?, 'delivery', ?)",
+          [uuidv4(), dp.id, ride.id, driverEarning, label]);
+      } else {
+        // Paid in cash (or the in-app payment never went through): the driver holds the
+        // whole fare, so the commission comes off their balance, as on Bolt
+        const commission = round2(fare - driverEarning);
+        await execute("UPDATE driver_profiles SET balance = balance - ?, total_earnings = total_earnings + ?, total_trips = total_trips + 1 WHERE id = ?",
+          [commission, driverEarning, dp.id]);
+        await execute("INSERT INTO driver_earnings (id, driver_id, ride_id, amount, type, description) VALUES (?, ?, ?, ?, 'delivery', ?)",
+          [uuidv4(), dp.id, ride.id, driverEarning, `${label} (cash)`]);
+        await execute("INSERT INTO driver_earnings (id, driver_id, ride_id, amount, type, description) VALUES (?, ?, ?, ?, 'adjustment', ?)",
+          [uuidv4(), dp.id, ride.id, -commission, `Commission on cash ${label.toLowerCase()}`]);
+      }
     }
 
     // Keep the order in step with its delivery
@@ -567,11 +817,8 @@ export async function toggleOnline(req, res) {
     } else {
       await execute("UPDATE driver_profiles SET is_online = 0 WHERE user_id = ?", [req.user.id]);
       await setDriverOffline(req.user.id).catch(() => {});
-      // Offers this driver was holding go back to the search
-      await execute(
-        "UPDATE ride_offers SET status = 'expired', responded_at = NOW() WHERE driver_user_id = ? AND status = 'offered'",
-        [req.user.id]
-      );
+      // Offers (and prices) this driver was holding go back to the search
+      await withdrawDriverOffers(ioOf(req), { driverUserId: req.user.id });
     }
     res.json({ isOnline: !!isOnline });
   } catch (err) {
@@ -601,6 +848,8 @@ export async function driverCurrentRide(req, res) {
         ride.shop_phone = ENV.STORE_PICKUP_PHONE || ride.shop_phone;
       }
       ride.earning = Math.round((ride.fare || 0) * DRIVER_SHARE);
+      // What the driver collects at the door: the whole fare unless it was paid in the app
+      ride.cash_to_collect = ride.delivery_fee_paid ? 0 : ride.fare;
       delete ride.sp_id;
       delete ride.route_polyline; // served by GET /rides/:id/route
     }

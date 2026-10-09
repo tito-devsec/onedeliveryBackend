@@ -46,8 +46,37 @@ const ENSURE_COLUMNS = {
     ["dispatch_wave",    "TINYINT NOT NULL DEFAULT 0"],
     ["dispatched_at",    "DATETIME DEFAULT NULL"],
     ["searching_since",  "DATETIME DEFAULT NULL"],
+    ["suggested_fare",   "DECIMAL(10,2) DEFAULT NULL"],
+    ["offered_fare",     "DECIMAL(10,2) DEFAULT NULL"],
+    ["payment_method",   "VARCHAR(10) NOT NULL DEFAULT 'mobile'"],
+  ],
+  ride_offers: [
+    ["counter_fare",     "DECIMAL(10,2) DEFAULT NULL"],
+    ["countered_at",     "DATETIME DEFAULT NULL"],
   ],
 };
+
+// ENUM columns that gained values: table → [column, full definition, a value that must be in it]
+const ENSURE_TYPES = {
+  ride_offers: [
+    ["status", "ENUM('offered','countered','accepted','declined','taken','expired','released','rejected') NOT NULL DEFAULT 'offered'", "countered"],
+  ],
+};
+
+async function ensureTypes(conn, dbName) {
+  for (const [table, cols] of Object.entries(ENSURE_TYPES)) {
+    for (const [col, def, mustHave] of cols) {
+      const [rows] = await conn.query(
+        "SELECT column_type FROM information_schema.columns WHERE table_schema = ? AND table_name = ? AND column_name = ?",
+        [dbName, table, col]
+      );
+      if (rows.length && !String(rows[0].column_type || rows[0].COLUMN_TYPE).includes(`'${mustHave}'`)) {
+        console.log(`   ✏️  ${table}.${col}`);
+        await conn.query(`ALTER TABLE \`${table}\` MODIFY COLUMN \`${col}\` ${def}`);
+      }
+    }
+  }
+}
 
 async function ensureColumns(conn, dbName) {
   for (const [table, cols] of Object.entries(ENSURE_COLUMNS)) {
@@ -87,6 +116,7 @@ async function migrate() {
   await conn.query(sql);
   console.log("⏳ Ensuring columns on existing tables…");
   await ensureColumns(conn, dbName);
+  await ensureTypes(conn, dbName);
   console.log("✅ Migrations complete.");
   await conn.end();
 }

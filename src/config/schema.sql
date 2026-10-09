@@ -295,7 +295,10 @@ CREATE TABLE IF NOT EXISTS ride_requests (
   dropoff_lat      DECIMAL(10,8) NOT NULL,
   dropoff_lng      DECIMAL(11,8) NOT NULL,
   dropoff_address  TEXT          DEFAULT '',
-  fare             DECIMAL(10,2) NOT NULL DEFAULT 0,
+  fare             DECIMAL(10,2) NOT NULL DEFAULT 0,       -- agreed price (the customer's offer until a driver is chosen)
+  suggested_fare   DECIMAL(10,2) DEFAULT NULL,             -- Bolt-style calculated price
+  offered_fare     DECIMAL(10,2) DEFAULT NULL,             -- the customer's current offer
+  payment_method   VARCHAR(10)   NOT NULL DEFAULT 'mobile',-- 'mobile' (in the app) or 'cash' (to the driver)
   distance_km      DECIMAL(8,2)  NOT NULL DEFAULT 0,
   route_polyline   TEXT          DEFAULT '',
   route_distance_m INT           DEFAULT NULL,
@@ -331,8 +334,10 @@ CREATE TABLE IF NOT EXISTS ride_offers (
   driver_user_id CHAR(36)     NOT NULL,              -- users.id (socket room / push target)
   wave           TINYINT      NOT NULL DEFAULT 1,
   distance_km    DECIMAL(8,2) NOT NULL DEFAULT 0,    -- driver → pickup when offered
-  status         ENUM('offered','accepted','declined','taken','expired','released') NOT NULL DEFAULT 'offered',
+  status         ENUM('offered','countered','accepted','declined','taken','expired','released','rejected') NOT NULL DEFAULT 'offered',
+  counter_fare   DECIMAL(10,2) DEFAULT NULL,         -- the driver's own price, if they countered
   offered_at     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  countered_at   DATETIME     DEFAULT NULL,
   responded_at   DATETIME     DEFAULT NULL,
   PRIMARY KEY (ride_id, driver_id),
   INDEX idx_ro_driver (driver_id, status),

@@ -107,7 +107,8 @@ export async function legRoute(ride, driverPos) {
   if ((!route || offRoute) && mapsEnabled()) {
     const lock = await getRedis().set(`lock:leg:${ride.id}`, "1", "EX", 20, "NX").catch(() => null);
     if (lock) {
-      const fresh = await computeRoute(driverPos, target, { cacheSeconds: 0 });
+      // With turn-by-turn steps for the driver's navigation banner
+      const fresh = await computeRoute(driverPos, target, { cacheSeconds: 0, steps: true });
       if (fresh?.polyline) {
         route = { leg, ...fresh, computedAt: Date.now() };
         await cacheSet(key, route, 6 * 3600);
@@ -129,7 +130,8 @@ export async function legRoute(ride, driverPos) {
     : estimateEtaSeconds(remaining, ride.vehicle_type);
   if (remaining > 50) eta = Math.max(eta, 60);
   return { leg, target, polyline: route.polyline, version: route.computedAt,
-           remainingMeters: Math.round(remaining), etaSeconds: eta, estimated: false };
+           remainingMeters: Math.round(remaining), etaSeconds: eta, estimated: false,
+           steps: route.steps || [] };
 }
 
 export async function clearLegRoute(rideId) {
