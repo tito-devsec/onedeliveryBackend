@@ -427,7 +427,7 @@ async function assignDriver(io, { rideId, dp, fare, by }) {
     const etaMin = pos && pickup ? Math.max(1, Math.round(estimateEtaSeconds(haversineMeters(pos, pickup), ride.vehicle_type) / 60)) : null;
     const payNote = ride.payment_method === "cash"
       ? "Pay the driver in cash on delivery."
-      : "Approve the mobile-money payment on your phone.";
+      : "Open OneDelivery to pay by mobile money.";
 
     sendPushNotification(ride.customer_id, {
       title: "✅ Driver confirmed",
