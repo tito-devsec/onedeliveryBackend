@@ -2,7 +2,9 @@ import { Server } from "socket.io";
 import jwt from "jsonwebtoken";
 import { ENV } from "../config/env.js";
 import { queryOne, execute } from "../config/db.js";
-import { setDriverOnline, setDriverOffline } from "../config/redis.js";
+import { setDriverOffline } from "../config/redis.js";
+import { isValidLatLng } from "../services/geo.js";
+import { recordDriverLocation, broadcastDriverLocation, forgetDriverWrites } from "../services/tracking.service.js";
 
 export function setupSocket(httpServer) {
   const io = new Server(httpServer, {
@@ -52,37 +54,27 @@ export function setupSocket(httpServer) {
     if (user.role === "driver") {
       socket.join(`driver:${user.id}`);
 
-      socket.on("driver:online", async ({ lat, lng }) => {
+      socket.on("driver:online", async ({ lat, lng, heading } = {}) => {
         try {
-          await execute(
-            "UPDATE driver_profiles SET is_online = 1, current_lat = ?, current_lng = ?, last_seen = NOW() WHERE user_id = ?",
-            [lat || null, lng || null, user.id]
-          );
-          await setDriverOnline(user.id, lat || 0, lng || 0);
+          await execute("UPDATE driver_profiles SET is_online = 1 WHERE user_id = ?", [user.id]);
+          lat = Number(lat); lng = Number(lng);
+          if (isValidLatLng(lat, lng)) {
+            forgetDriverWrites(user.id);
+            await recordDriverLocation(user.id, lat, lng, Number(heading) || 0);
+          }
           socket.to("admin_room").emit("driver:status", { driverId: user.id, online: true });
         } catch (e) { console.error("driver:online", e.message); }
       });
 
-      socket.on("driver:location", async ({ lat, lng, heading, rideId }) => {
+      // GPS fix from the driver app. The delivery it belongs to is looked up on the
+      // server (tracking.service), so a payload's rideId is never trusted.
+      socket.on("driver:location", async ({ lat, lng, heading } = {}) => {
         try {
-          await execute(
-            "UPDATE driver_profiles SET current_lat = ?, current_lng = ?, heading = ?, last_seen = NOW() WHERE user_id = ?",
-            [lat, lng, heading || 0, user.id]
-          );
-          await setDriverOnline(user.id, lat, lng);
-
-          // Broadcast live location to customer tracking that ride
-          if (rideId) {
-            const ride = await queryOne("SELECT customer_id FROM ride_requests WHERE id = ?", [rideId]);
-            if (ride) {
-              io.to(`user:${ride.customer_id}`).emit("driver:location_update", { lat, lng, heading, rideId });
-            }
-            // Also broadcast to seller if order linked
-            const orderRide = await queryOne("SELECT o.seller_id FROM ride_requests r JOIN orders o ON r.order_id = o.id WHERE r.id = ?", [rideId]);
-            if (orderRide?.seller_id) {
-              io.to(`user:${orderRide.seller_id}`).emit("driver:location_update", { lat, lng, heading, rideId });
-            }
-          }
+          lat = Number(lat); lng = Number(lng);
+          if (!isValidLatLng(lat, lng)) return;
+          heading = Number(heading) || 0;
+          await recordDriverLocation(user.id, lat, lng, heading);
+          await broadcastDriverLocation(io, user.id, { lat, lng, heading });
 
           // Admin can see all driver positions
           io.to("admin_room").emit("driver:position", { driverId: user.id, lat, lng, heading });
@@ -130,28 +122,18 @@ export function setupSocket(httpServer) {
       socket.to(`conv:${conversationId}`).emit("chat:stop_typing", { userId: user.id });
     });
 
-    // ── Track order room (customer joins to get live updates) ─────────────
-    socket.on("track:join", ({ rideId }) => {
-      socket.join(`ride:${rideId}`);
-    });
-
-    socket.on("track:leave", ({ rideId }) => {
-      socket.leave(`ride:${rideId}`);
-    });
+    // Live tracking updates go to each user's own room (user:<id>), so the old
+    // track:join / track:leave events from the apps need no room of their own.
+    socket.on("track:join", () => {});
+    socket.on("track:leave", () => {});
 
     // ── Disconnect ────────────────────────────────────────────────────────
-    socket.on("disconnect", async () => {
+    // A driver is NOT taken offline when the socket drops: the driver app keeps sending
+    // its position over HTTPS from a background service (e.g. while Google Maps is
+    // navigating). Dispatch only uses drivers whose last fix is under 2 minutes old,
+    // and the jobs take silent drivers offline after 5 minutes.
+    socket.on("disconnect", () => {
       console.log(`[Socket] Disconnected: ${user.name}`);
-      // Driver: if no other sockets, go offline
-      if (user.role === "driver") {
-        const sockets = await io.in(`driver:${user.id}`).fetchSockets();
-        if (sockets.length === 0) {
-          try {
-            await execute("UPDATE driver_profiles SET is_online = 0 WHERE user_id = ?", [user.id]);
-            await setDriverOffline(user.id);
-          } catch (e) { /* non-critical */ }
-        }
-      }
     });
   });
 

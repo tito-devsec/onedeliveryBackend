@@ -2,6 +2,7 @@ import { v4 as uuidv4 } from "uuid";
 import { query, queryOne, execute } from "../config/db.js";
 import { uploadBuffer } from "../services/upload.service.js";
 import { saveExpoToken, saveFcmToken, removeExpoToken } from "../services/notification.service.js";
+import { isValidLatLng } from "../services/geo.js";
 
 // POST /api/seller/apply
 export async function applyAsSeller(req, res) {
@@ -79,8 +80,14 @@ export async function getSellerProfile(req, res) {
 // PUT /api/seller/profile
 export async function updateSellerProfile(req, res) {
   try {
-    const { shop_name, shop_description, shop_phone, shop_address, shop_lat, shop_lng,
+    const { shop_name, shop_description, shop_phone, shop_address,
             bank_name, bank_account_name, bank_account_number, mobile_money_number } = req.body;
+    let { shop_lat, shop_lng } = req.body;
+    // The shop location is the pickup point drivers navigate to, so it must be a real pair
+    if (shop_lat !== undefined || shop_lng !== undefined) {
+      shop_lat = parseFloat(shop_lat); shop_lng = parseFloat(shop_lng);
+      if (!isValidLatLng(shop_lat, shop_lng)) return res.status(400).json({ error: "Invalid shop location" });
+    }
     const fields = []; const vals = [];
     const map = { shop_name, shop_description, shop_phone, shop_address, shop_lat, shop_lng,
                   bank_name, bank_account_name, bank_account_number, mobile_money_number };
@@ -93,7 +100,8 @@ export async function updateSellerProfile(req, res) {
     }
     if (!fields.length) return res.status(400).json({ error: "Nothing to update" });
     vals.push(req.user.id);
-    await execute(`UPDATE seller_profiles SET ${fields.join(", ")} WHERE user_id = ?`, vals);
+    const r = await execute(`UPDATE seller_profiles SET ${fields.join(", ")} WHERE user_id = ?`, vals);
+    if (!r.affectedRows) return res.status(404).json({ error: "Seller profile not found" });
     res.json({ message: "Profile updated" });
   } catch (err) {
     res.status(500).json({ error: "Update failed" });

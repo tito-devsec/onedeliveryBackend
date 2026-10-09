@@ -40,7 +40,17 @@ export const ENV = {
   // Google sign-in: OAuth "Web client" ID(s) the apps request ID tokens for (comma-separated)
   GOOGLE_CLIENT_IDS: (process.env.GOOGLE_CLIENT_IDS || "").split(",").map(s => s.trim()).filter(Boolean),
 
+  // Server-side Google Maps key (Routes API, Places API (New), Geocoding API)
   GOOGLE_MAPS_API_KEY: process.env.GOOGLE_MAPS_API_KEY || "",
+  // Live-traffic routes are billed at the Routes "Pro" rate; off by default
+  MAPS_TRAFFIC_AWARE:  process.env.MAPS_TRAFFIC_AWARE === "true",
+
+  // Pickup point for orders whose seller has no shop profile (OneDelivery's own store)
+  STORE_PICKUP_LAT:     parseFloat(process.env.STORE_PICKUP_LAT || ""),
+  STORE_PICKUP_LNG:     parseFloat(process.env.STORE_PICKUP_LNG || ""),
+  STORE_PICKUP_NAME:    process.env.STORE_PICKUP_NAME || "OneDelivery Store",
+  STORE_PICKUP_ADDRESS: process.env.STORE_PICKUP_ADDRESS || "",
+  STORE_PICKUP_PHONE:   process.env.STORE_PICKUP_PHONE || "",
 
   // ── Out-of-app notifications (email) — Brevo SMTP ─────────────────────
   SMTP_HOST:  process.env.SMTP_HOST  || "",

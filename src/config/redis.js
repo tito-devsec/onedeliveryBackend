@@ -44,9 +44,9 @@ export async function cacheDel(...keys) {
 }
 
 // Online drivers set: track which drivers are live
-export async function setDriverOnline(driverId, lat, lng) {
+export async function setDriverOnline(driverId, lat, lng, heading = 0) {
   const r = getRedis();
-  await r.hset(`driver:loc:${driverId}`, { lat, lng, ts: Date.now() });
+  await r.hset(`driver:loc:${driverId}`, { lat, lng, heading, ts: Date.now() });
   await r.sadd("drivers:online", driverId);
   await r.expire(`driver:loc:${driverId}`, 120); // expire if no heartbeat 2 min
 }

@@ -4,6 +4,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 
 import express from "express";
+import jwt from "jsonwebtoken";
 import helmet from "helmet";
 import cors from "cors";
 import compression from "compression";
@@ -30,6 +31,7 @@ import cartRoutes    from "./routes/cart.route.js";
 import reviewRoutes  from "./routes/review.route.js";
 import userRoutes    from "./routes/user.route.js";
 import adminRoutes   from "./routes/admin.route.js";
+import mapsRoutes    from "./routes/maps.route.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -74,10 +76,22 @@ app.use(
 );
 
 // ── Global rate limit ─────────────────────────────────────────────────────────
+// Signed-in users are limited per account, not per IP: mobile networks put many
+// phones behind one address, and the driver/tracking screens refresh every few seconds.
+function rateKey(req) {
+  if (req.rateKey) return req.rateKey;
+  const h = req.headers.authorization;
+  let key = `ip:${req.ip}`;
+  if (h?.startsWith("Bearer ")) {
+    try { key = `user:${jwt.verify(h.slice(7), ENV.JWT_SECRET).sub}`; } catch { /* expired or invalid: count by IP */ }
+  }
+  return (req.rateKey = key);
+}
 app.use(
   rateLimit({
     windowMs: ENV.RATE_LIMIT_WINDOW_MS || 15 * 60 * 1000,
-    max:      ENV.RATE_LIMIT_MAX       || 300,
+    limit:    (req) => (rateKey(req).startsWith("user:") ? 2000 : ENV.RATE_LIMIT_MAX || 300),
+    keyGenerator: rateKey,
     standardHeaders: true,
     legacyHeaders:   false,
     skip: (req) => req.path === "/api/health",
@@ -133,6 +147,7 @@ app.use("/api/cart",     cartRoutes);
 app.use("/api/reviews",  reviewRoutes);
 app.use("/api",          userRoutes);    // /api/seller/*, /api/driver/*, /api/notifications/*
 app.use("/api/admin",    adminRoutes);
+app.use("/api/maps",     mapsRoutes);    // address search, geocoding and routes (Google key stays here)
 
 // ── Public legal pages (linked from the apps, Google sign-in consent screen, Play Store) ──
 const legalDir = path.join(__dirname, "../public/legal");
@@ -165,7 +180,7 @@ app.set("io", io);
 async function boot() {
   await connectDB();
   getRedis(); // init Redis connection
-  startJobs();
+  startJobs(io);
   httpServer.listen(ENV.PORT, "0.0.0.0", () => {
     console.log(`✅ OneDelivery API v2 running on port ${ENV.PORT} [${ENV.NODE_ENV}]`);
     console.log(`   HTTP:      http://localhost:${ENV.PORT}`);

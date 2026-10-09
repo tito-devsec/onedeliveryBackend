@@ -1,21 +1,26 @@
 import { execute, query } from "../config/db.js";
+import { setDriverOffline } from "../config/redis.js";
 import { sendPushNotification } from "../services/notification.service.js";
+import { escalateDispatch, closeOffers } from "../services/dispatch.service.js";
 
 // Run all cleanup jobs — call this on a schedule (setInterval or cron)
 
-// ── Expire stale 'searching' rides (older than 10 min with no driver) ─────────
-export async function expireStaleRides() {
+// ── Expire stale 'searching' rides (10 min without a driver accepting) ────────
+export async function expireStaleRides(io) {
   try {
     const stale = await query(
-      "SELECT id, customer_id FROM ride_requests WHERE status = 'searching' AND created_at < NOW() - INTERVAL 10 MINUTE"
+      "SELECT id, customer_id FROM ride_requests WHERE status = 'searching' AND COALESCE(searching_since, created_at) < NOW() - INTERVAL 10 MINUTE"
     );
     for (const ride of stale) {
-      await execute("UPDATE ride_requests SET status = 'no_driver' WHERE id = ?", [ride.id]);
+      const r = await execute("UPDATE ride_requests SET status = 'no_driver' WHERE id = ? AND status = 'searching'", [ride.id]);
+      if (!r.affectedRows) continue;
+      await closeOffers(io, ride.id, "expired");
+      io?.to(`user:${ride.customer_id}`).emit("ride:status", { rideId: ride.id, status: "no_driver" });
       sendPushNotification(ride.customer_id, {
         title: "😔 No driver found",
         body:  "We couldn't find a nearby driver. Please try again or choose a different vehicle type.",
         type:  "no_driver",
-        data:  { rideId: ride.id },
+        data:  { rideId: ride.id, screen: "track_order" },
       }).catch(() => {});
     }
     if (stale.length) console.log(`[jobs] Expired ${stale.length} stale rides`);
@@ -35,10 +40,20 @@ export async function expireSubscriptions() {
 // ── Mark drivers offline if last_seen > 5 min ─────────────────────────────────
 export async function markDriversOffline() {
   try {
-    const { affectedRows } = await execute(
-      "UPDATE driver_profiles SET is_online = 0 WHERE is_online = 1 AND last_seen < NOW() - INTERVAL 5 MINUTE"
+    const silent = await query(
+      "SELECT user_id FROM driver_profiles WHERE is_online = 1 AND (last_seen IS NULL OR last_seen < NOW() - INTERVAL 5 MINUTE)"
     );
-    if (affectedRows) console.log(`[jobs] Marked ${affectedRows} drivers offline (stale heartbeat)`);
+    if (!silent.length) return;
+    await execute(
+      "UPDATE driver_profiles SET is_online = 0 WHERE is_online = 1 AND (last_seen IS NULL OR last_seen < NOW() - INTERVAL 5 MINUTE)"
+    );
+    for (const d of silent) await setDriverOffline(d.user_id).catch(() => {});
+    await execute(
+      `UPDATE ride_offers SET status = 'expired', responded_at = NOW()
+       WHERE status = 'offered' AND driver_user_id IN (${silent.map(() => "?").join(",")})`,
+      silent.map((d) => d.user_id)
+    );
+    console.log(`[jobs] Marked ${silent.length} drivers offline (stale heartbeat)`);
   } catch (e) { console.error("[jobs] markDriversOffline:", e.message); }
 }
 
@@ -60,10 +75,13 @@ export async function expireFeaturedProducts() {
 }
 
 // ── Start all background jobs ─────────────────────────────────────────────────
-export function startJobs() {
-  // Every 2 minutes
-  setInterval(expireStaleRides,     2 * 60 * 1000);
-  setInterval(markDriversOffline,   3 * 60 * 1000);
+export function startJobs(io) {
+  // Every 10 seconds: widen the driver search for rides nobody has accepted yet
+  setInterval(() => escalateDispatch(io), 10 * 1000);
+
+  // Every minute / few minutes
+  setInterval(() => expireStaleRides(io), 60 * 1000);
+  setInterval(markDriversOffline,   2 * 60 * 1000);
 
   // Every 10 minutes
   setInterval(expireSubscriptions,  10 * 60 * 1000);

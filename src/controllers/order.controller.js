@@ -2,6 +2,7 @@ import { v4 as uuidv4 } from "uuid";
 import { query, queryOne, execute, withTransaction } from "../config/db.js";
 import { sendPushNotification } from "../services/notification.service.js";
 import { ENV } from "../config/env.js";
+import { ORDER_WITH_SHOP_SQL, resolvePickup } from "../services/dispatch.service.js";
 
 // GET /api/orders  (user's own orders)
 export async function myOrders(req, res) {
@@ -9,7 +10,9 @@ export async function myOrders(req, res) {
     const orders = await query(
       `SELECT o.*, GROUP_CONCAT(
         JSON_OBJECT('name', oi.name, 'price', oi.price, 'quantity', oi.quantity, 'image', oi.image)
-      ) AS items_json
+      ) AS items_json,
+        (SELECT r.id FROM ride_requests r WHERE r.order_id = o.id ORDER BY r.created_at DESC LIMIT 1) AS ride_id,
+        (SELECT r.status FROM ride_requests r WHERE r.order_id = o.id ORDER BY r.created_at DESC LIMIT 1) AS ride_status
        FROM orders o
        LEFT JOIN order_items oi ON o.id = oi.order_id
        WHERE o.user_id = ?
@@ -32,16 +35,16 @@ export async function myOrders(req, res) {
 // GET /api/orders/:id
 export async function getOrder(req, res) {
   try {
-    const order = await queryOne(
-      `SELECT o.*, sp.shop_name, sp.shop_address, sp.shop_lat, sp.shop_lng
-       FROM orders o
-       LEFT JOIN seller_profiles sp ON o.seller_id = sp.user_id
-       WHERE o.id = ? AND o.user_id = ?`,
-      [req.params.id, req.user.id]
-    );
+    const order = await queryOne(`${ORDER_WITH_SHOP_SQL} WHERE o.id = ? AND o.user_id = ?`, [req.params.id, req.user.id]);
     if (!order) return res.status(404).json({ error: "Order not found" });
     const items = await query("SELECT * FROM order_items WHERE order_id = ?", [order.id]);
-    res.json({ order: { ...order, items } });
+
+    // Where a delivery for this order is collected (the seller's shop). Contact details
+    // stay with the driver: customers talk to sellers only through OneDelivery support.
+    const p = resolvePickup(order);
+    const pickup = p ? { lat: p.lat, lng: p.lng, name: p.name, address: p.address } : null;
+    const { sp_id, shop_phone, seller_phone, ...rest } = order;
+    res.json({ order: { ...rest, items, pickup } });
   } catch (err) {
     res.status(500).json({ error: "Internal server error" });
   }

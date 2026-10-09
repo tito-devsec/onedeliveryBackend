@@ -38,6 +38,14 @@ const ENSURE_COLUMNS = {
   driver_profiles: [
     ["mobile_money_number", "VARCHAR(20) DEFAULT ''"],
     ["driver_photo_url",    "TEXT"],
+    ["total_reviews",       "INT NOT NULL DEFAULT 0"],
+  ],
+  ride_requests: [
+    ["route_distance_m", "INT DEFAULT NULL"],
+    ["route_duration_s", "INT DEFAULT NULL"],
+    ["dispatch_wave",    "TINYINT NOT NULL DEFAULT 0"],
+    ["dispatched_at",    "DATETIME DEFAULT NULL"],
+    ["searching_since",  "DATETIME DEFAULT NULL"],
   ],
 };
 

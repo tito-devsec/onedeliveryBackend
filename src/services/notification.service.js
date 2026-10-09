@@ -22,6 +22,7 @@ const APP_FOR_TYPE = {
   package_activated: "shop", package_assigned: "shop",
   ride_searching: "shop", ride_accepted: "shop", no_driver: "shop", ride_going_to_shop: "shop",
   ride_picked_up: "shop", ride_on_the_way: "shop", ride_delivered: "shop", ride_cancelled: "shop",
+  ride_released: "shop", ride_driver_assigned: "shop", shop_location_missing: "shop",
 };
 
 let firebaseApp = null;

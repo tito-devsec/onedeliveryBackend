@@ -1,3 +1,6 @@
+// Part of the delivery fee paid out to the driver
+export const DRIVER_SHARE = 0.85;
+
 // TZS pricing for each vehicle type
 const BASE  = { bodaboda: 2000, bajaj: 1500, pickup: 5000, toyo: 3500 };
 const PER_KM = { bodaboda: 700,  bajaj: 500,  pickup: 1500, toyo: 900 };

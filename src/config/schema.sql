@@ -109,6 +109,7 @@ CREATE TABLE IF NOT EXISTS driver_profiles (
   heading             DECIMAL(6,2) DEFAULT 0,
   last_seen           DATETIME     DEFAULT NULL,
   rating              DECIMAL(3,2) NOT NULL DEFAULT 0.00,
+  total_reviews       INT          NOT NULL DEFAULT 0,
   total_trips         INT          NOT NULL DEFAULT 0,
   total_earnings      DECIMAL(14,2) NOT NULL DEFAULT 0.00,
   balance             DECIMAL(14,2) NOT NULL DEFAULT 0.00,
@@ -297,6 +298,11 @@ CREATE TABLE IF NOT EXISTS ride_requests (
   fare             DECIMAL(10,2) NOT NULL DEFAULT 0,
   distance_km      DECIMAL(8,2)  NOT NULL DEFAULT 0,
   route_polyline   TEXT          DEFAULT '',
+  route_distance_m INT           DEFAULT NULL,
+  route_duration_s INT           DEFAULT NULL,
+  dispatch_wave    TINYINT       NOT NULL DEFAULT 0,
+  dispatched_at    DATETIME      DEFAULT NULL,
+  searching_since  DATETIME      DEFAULT NULL,
   delivery_fee_paid TINYINT(1)   NOT NULL DEFAULT 0,
   delivery_payment_ref VARCHAR(100) DEFAULT NULL,
   cancelled_reason TEXT          DEFAULT '',
@@ -316,6 +322,21 @@ CREATE TABLE IF NOT EXISTS ride_requests (
   INDEX idx_rr_driver   (driver_id),
   INDEX idx_rr_status   (status),
   INDEX idx_rr_order    (order_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ─── RIDE OFFERS (which nearby drivers a delivery was offered to) ─────────────
+CREATE TABLE IF NOT EXISTS ride_offers (
+  ride_id        CHAR(36)     NOT NULL,
+  driver_id      CHAR(36)     NOT NULL,              -- driver_profiles.id
+  driver_user_id CHAR(36)     NOT NULL,              -- users.id (socket room / push target)
+  wave           TINYINT      NOT NULL DEFAULT 1,
+  distance_km    DECIMAL(8,2) NOT NULL DEFAULT 0,    -- driver → pickup when offered
+  status         ENUM('offered','accepted','declined','taken','expired','released') NOT NULL DEFAULT 'offered',
+  offered_at     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  responded_at   DATETIME     DEFAULT NULL,
+  PRIMARY KEY (ride_id, driver_id),
+  INDEX idx_ro_driver (driver_id, status),
+  INDEX idx_ro_status (ride_id, status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ─── DRIVER EARNINGS ──────────────────────────────────────────────────────────
