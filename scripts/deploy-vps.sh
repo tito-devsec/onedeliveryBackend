@@ -68,6 +68,17 @@ tar -xzf "$TAR" -C "$NEW"
 cp -a "$LIVE/.env" "$NEW/.env"
 [ -d "$LIVE/secrets" ] && cp -a "$LIVE/secrets" "$NEW/"
 echo "$COMMIT" > "$NEW/DEPLOYED_COMMIT"
+# Keep the folder a git checkout of GitHub when it is one (never prompts: stdin is this script)
+if [ -d "$LIVE/.git" ]; then
+  cp -a "$LIVE/.git" "$NEW/.git"
+  if command -v git >/dev/null \
+     && GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="ssh -o BatchMode=yes" timeout 60 git -C "$NEW" fetch -q origin </dev/null 2>/dev/null \
+     && git -C "$NEW" cat-file -e "$COMMIT^{commit}" 2>/dev/null; then
+    git -C "$NEW" reset -q "$COMMIT" </dev/null && echo "Git: the folder is at commit $COMMIT"
+  else
+    echo "(Git history in the folder not updated: couldn't fetch $COMMIT from GitHub - the code itself is deployed)"
+  fi
+fi
 
 say "3/6 Installing packages"
 cd "$NEW"
